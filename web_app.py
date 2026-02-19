@@ -38,7 +38,6 @@ def save_to_supabase(card_name, price):
     return response.status_code in [200, 201]
 
 def detect_cards(image_file):
-    """Detection logic utilizing 1200px standardization."""
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
     ratio = 1200.0 / img.shape[0]
@@ -62,10 +61,10 @@ def detect_cards(image_file):
 
 st.set_page_config(page_title="TraidLive | Professional Card Inventory", layout="wide")
 
-# Custom CSS for a professional, minimalist look
+# FIX: Changed unsafe_allow_value to unsafe_allow_html
 st.markdown("""
     <style>
-    .main {
+    .stApp {
         background-color: #f8f9fa;
     }
     .stButton>button {
@@ -74,16 +73,12 @@ st.markdown("""
         background-color: #004a99;
         color: white;
     }
-    .stTextInput>div>div>input {
-        border-radius: 4px;
-    }
     </style>
-    """, unsafe_allow_value=True)
+    """, unsafe_allow_html=True)
 
 st.title("TraidLive Asset Management")
 st.write("Production Market Analysis Environment")
 
-# Sidebar for account overview
 with st.sidebar:
     st.header("Account Overview")
     st.info("Authorized User: nbult99")
@@ -101,7 +96,6 @@ if uploaded_image:
     if detected_items:
         st.success(f"Analysis Complete: {len(detected_items)} assets identified.")
         
-        # Professional Grid Layout
         cols = st.columns(4)
         for i, item in enumerate(detected_items):
             with cols[i % 4]:
@@ -136,7 +130,6 @@ if st.button("Refresh Database Records"):
         data = response.json()
         if data:
             df = pd.DataFrame(data)
-            # Reordering columns for professional reporting
             df = df[['card_name', 'market_price', 'created_at']]
             df.columns = ['Asset Name', 'Market Value', 'Date Identified']
             st.dataframe(df, use_container_width=True)
