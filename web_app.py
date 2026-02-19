@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import base64
 
-# --- 1. CORE API LOGIC ---
+# --- 1. EBAY PRODUCTION LOGIC ---
 
 def get_ebay_token():
     """Generates a live OAuth token from eBay Production."""
@@ -27,16 +27,14 @@ def get_ebay_token():
     except Exception:
         return None
 
-def fetch_card_price(card_name, graded_only=False):
-    """Fetches real-time market data filtered specifically to Category 212."""
+def fetch_card_price(card_name):
+    """Fetches real-time market data filtered to Sports Trading Cards (ID 212)."""
     token = get_ebay_token()
-    if not token: return None
-    
-    # Refining the query
-    query = f"{card_name} PSA BGS Graded" if graded_only else card_name
+    if not token: 
+        return "Error: Could not get eBay Token"
     
     # category_ids=212 targets 'Sports Trading Cards' only
-    url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query}&category_ids=212&limit=5"
+    url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={card_name}&category_ids=212&limit=5"
     
     headers = {
         "Authorization": f"Bearer {token}",
@@ -45,60 +43,40 @@ def fetch_card_price(card_name, graded_only=False):
     
     try:
         response = requests.get(url, headers=headers)
-        items = response.json().get("itemSummaries", [])
+        data = response.json()
+        items = data.get("itemSummaries", [])
         
         if not items:
-            return None
+            return "No items found for this search."
             
         prices = [float(item['price']['value']) for item in items if 'price' in item]
-        return sum(prices) / len(prices) if prices else None
-    except Exception:
-        return None
+        return sum(prices) / len(prices) if prices else "No pricing data available."
+    except Exception as e:
+        return f"API Error: {str(e)}"
 
-# --- 2. MAIN MOBILE UI ---
+# --- 2. MAIN USER INTERFACE ---
 
-st.set_page_config(page_title="TraidLive", page_icon="🎴")
+st.set_page_config(page_title="TraidLive Price Checker", page_icon="📈")
 
-st.title("🎴 TraidLive")
-st.write("Live Production Environment")
+st.title("📈 TraidLive Market Checker")
+st.write("Live Connection: **eBay Production Marketplace**")
 
-# Sidebar for user info
-st.sidebar.title("Collector Profile")
-st.sidebar.info("User: nbult99")
-
-# --- 3. SYSTEM TRIAL SECTION (The Mickey Mantle Test) ---
+# --- 3. THE LEBRON JAMES TRIAL ---
 st.divider()
-st.subheader("🔧 System Diagnostic")
-st.write("Run this trial to verify your live eBay Production connection.")
+st.subheader("🧪 Live Trial")
+card_to_search = st.text_input("Enter card name to search (e.g., LeBron James Rookie):", value="LeBron James")
 
-if st.button("RUN MICKEY MANTLE TRIAL"):
-    with st.spinner("Pinging eBay Production Servers..."):
-        trial_price = fetch_card_price("1952 Topps Mickey Mantle")
+if st.button("PULL LIVE EBAY PRICE"):
+    with st.spinner(f"Querying eBay for '{card_to_search}'..."):
+        result = fetch_card_price(card_to_search)
         
-        if trial_price:
-            st.balloons() # Success celebration!
-            st.success("Handshake Successful! Connection is Live.")
-            st.metric("1952 Mickey Mantle Avg", f"${trial_price:,.2f}")
+        if isinstance(result, float):
+            st.balloons()
+            st.success(f"Successfully pulled data from eBay!")
+            st.metric(label=f"Avg Price for {card_to_search}", value=f"${result:,.2f}")
         else:
-            st.error("Diagnostic Failed.")
-            st.info("Check if your EBAY_APP_ID in Secrets starts with 'NoahBult-traidliv-PRD'.")
+            st.error(result)
 
-# --- 4. SCANNER SECTION ---
+# --- 4. SYSTEM STATUS ---
 st.divider()
-st.subheader("📷 Card Scanner")
-uploaded_file = st.camera_input("Scan Card")
-
-if uploaded_file:
-    # Placeholder for identified card name
-    card_identity = "2023 Bowman Draft Tom Brady" 
-    st.info(f"Analyzing: {card_identity}")
-    
-    graded = st.toggle("Filter for Graded (PSA/BGS)")
-    
-    if st.button("Get Real-Time Value"):
-        with st.spinner("Searching Market..."):
-            price = fetch_card_price(card_identity, graded_only=graded)
-            if price:
-                st.metric("Market Average", f"${price:.2f}")
-            else:
-                st.warning("No recent sales found for this specific card.")
+st.caption("Logged in as: nbult99 | Status: Production Active")
