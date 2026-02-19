@@ -3,3 +3,6 @@ Pillow
 requests
 supabase
 huggingface_hub
+opencv-python-headless
+numpy
+pandas
