@@ -7,7 +7,7 @@ import pandas as pd
 from huggingface_hub import InferenceClient
 from supabase import create_client
 
-# --- 1. INITIALIZATION ---
+# --- 1. INITIALIZATION & SECURE CONNECTIVITY ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
@@ -28,59 +28,12 @@ st.set_page_config(page_title="TraidLive Dashboard", layout="wide", initial_side
 
 st.markdown("""
     <style>
-    /* Global Styles */
-    .stApp { 
-        background-color: #000000; 
-        color: #FFFFFF; 
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif; 
-    }
-    
-    /* KPI Metric Cards */
+    .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, sans-serif; }
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: 700; color: #FFFFFF; }
-    div[data-testid="stMetric"] { 
-        background: rgba(28, 28, 30, 0.8); 
-        backdrop-filter: blur(20px); 
-        border-radius: 18px; 
-        padding: 20px; 
-        border: 1px solid rgba(255, 255, 255, 0.1); 
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8);
-    }
-    
-    /* iOS "System Blue" Primary Buttons */
-    .stButton > button { 
-        background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); 
-        color: white; 
-        border-radius: 14px; 
-        border: none; 
-        padding: 12px 24px; 
-        font-weight: 600; 
-        width: 100%; 
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); 
-    }
-    .stButton > button:hover { opacity: 0.9; transform: scale(1.01); color: white; border: none; }
-    .stButton > button:active { transform: scale(0.98); }
-    
-    /* Obsidian Field Inputs */
-    div.stTextInput > div > div > input { 
-        background-color: #1C1C1E; 
-        color: white; 
-        border: 1px solid #3A3A3C; 
-        border-radius: 12px; 
-        padding: 14px; 
-        font-size: 16px;
-    }
-    
-    /* Premium Sidebar */
-    section[data-testid="stSidebar"] { 
-        background-color: #1C1C1E; 
-        border-right: 1px solid #3A3A3C; 
-    }
-    
-    /* Smooth Divider */
-    hr { border-top: 1px solid #3A3A3C; }
-
-    /* Header Refinement */
-    h1, h2, h3 { letter-spacing: -0.03em; font-weight: 700; }
+    div[data-testid="stMetric"] { background: rgba(28, 28, 30, 0.8); backdrop-filter: blur(20px); border-radius: 18px; padding: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
+    .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 14px; border: none; padding: 12px; font-weight: 600; width: 100%; transition: all 0.2s ease; }
+    div.stTextInput > div > div > input { background-color: #1C1C1E; color: white; border-radius: 12px; }
+    section[data-testid="stSidebar"] { background-color: #1C1C1E; border-right: 1px solid #3A3A3C; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -154,15 +107,20 @@ owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 st.sidebar.divider()
 st.sidebar.caption("v2.0 obsidian.ios.dark")
 
-uploaded_file = st.file_uploader("", type=['jpg', 'jpeg', 'png'])
+# CAMERA VS GALLERY TOGGLE
+source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
+
+if source == "Camera":
+    uploaded_file = st.camera_input("Snap a photo of your cards")
+else:
+    uploaded_file = st.file_uploader("", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("Executing Computer Vision..."):
+    with st.spinner("Analyzing Assets..."):
         uploaded_file.seek(0)
         asset_crops = detect_cards(uploaded_file)
     
     if asset_crops:
-        # Action Toolbar
         col_ai, col_commit_all = st.columns(2)
         with col_ai:
             if st.button("AI Batch Identification"):
@@ -172,7 +130,7 @@ if uploaded_file:
         with col_commit_all:
             if 'suggestions' in st.session_state:
                 if st.button("Commit All to Database"):
-                    with st.spinner("Synchronizing Portfolio..."):
+                    with st.spinner("Synchronizing..."):
                         for i, name in enumerate(st.session_state['suggestions']):
                             p_psa = fetch_market_valuation(name, "PSA 10")
                             p_raw = fetch_market_valuation(name, "Ungraded")
@@ -185,7 +143,7 @@ if uploaded_file:
             for i, crop in enumerate(asset_crops):
                 with grid[i % 4]:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
-                    st.session_state['suggestions'][i] = st.text_input(f"Identifier {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
+                    st.session_state['suggestions'][i] = st.text_input(f"ID {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
                     if st.button(f"Commit {i+1}", key=f"btn_{i}"):
                         p_psa = fetch_market_valuation(st.session_state['suggestions'][i], "PSA 10")
