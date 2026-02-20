@@ -9,19 +9,15 @@ from supabase import create_client
 
 # --- 1. INITIALIZATION & SECURE CREDENTIALS ---
 
-# Retrieve secrets from Streamlit's secure vault
-# This prevents GitHub Push Protection errors
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 EBAY_APP_ID = st.secrets.get("EBAY_APP_ID", "")
 EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "")
 
-# Initialize Clients
 @st.cache_resource
 def init_connections():
     s_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    # Using Qwen2.5-VL for state-of-the-art trading card vision analysis
     h_client = InferenceClient(api_key=HF_TOKEN) if HF_TOKEN else None
     return s_client, h_client
 
@@ -33,7 +29,7 @@ HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 def auto_label_crops(crops):
     """Uses Vision AI to identify card details from image crops."""
     if not hf_client:
-        st.error("Hugging Face Token missing. Please check your secrets.")
+        st.error("Identification Error: Hugging Face Token is not configured.")
         return ["" for _ in crops]
     
     labels = []
@@ -52,33 +48,55 @@ def auto_label_crops(crops):
             )
             labels.append(resp.choices[0].message.content.strip())
         except Exception as e:
+            st.warning(f"Vision analysis failed for an asset: {str(e)}")
             labels.append("")
     return labels
 
 def fetch_ebay_price(card_name):
-    """Obtains live market averages via eBay Production API."""
-    url = "https://api.ebay.com/identity/v1/oauth2/token"
+    """Diagnostic version of eBay price retrieval."""
+    token_url = "https://api.ebay.com/identity/v1/oauth2/token"
+    
+    if not EBAY_APP_ID or not EBAY_CERT_ID:
+        st.error("Credential Error: eBay credentials missing in secrets.")
+        return None
+
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
     try:
+        # 1. Obtain Token
         token_resp = requests.post(
-            url, 
+            token_url, 
             headers={"Authorization": f"Basic {encoded_auth}", "Content-Type": "application/x-www-form-urlencoded"}, 
             data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}
         )
         token = token_resp.json().get("access_token")
         
-        if not token: return None
+        if not token:
+            st.error(f"Authentication Failed: {token_resp.json().get('error_description', 'Invalid Credentials')}")
+            return None
 
-        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={card_name}&category_ids=212&limit=5"
+        # 2. Execute Search
+        query_encoded = requests.utils.quote(card_name)
+        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&category_ids=212&limit=5"
         headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}
         
-        data = requests.get(ebay_url, headers=headers).json()
+        resp = requests.get(ebay_url, headers=headers)
+        if resp.status_code != 200:
+            st.error(f"Marketplace Search Failed: Status {resp.status_code}")
+            return None
+            
+        data = resp.json()
         items = data.get("itemSummaries", [])
+        
+        if not items:
+            st.warning(f"Market Gap: No current listings found for '{card_name}'.")
+            return None
+            
         prices = [float(item['price']['value']) for item in items if 'price' in item]
-        return sum(prices) / len(prices) if prices else None
-    except:
+        return sum(prices) / len(prices)
+    except Exception as e:
+        st.error(f"System Exception during pricing: {str(e)}")
         return None
 
 def detect_cards(image_file):
@@ -110,7 +128,7 @@ st.set_page_config(page_title="TraidLive Asset Management", layout="wide")
 st.markdown("""
     <style>
     .stApp { background-color: #ffffff; }
-    .stButton>button { width: 100%; background-color: #1a1a1a; color: white; border: none; padding: 10px; border-radius: 4px;}
+    .stButton>button { width: 100%; background-color: #1a1a1a; color: white; border: none; padding: 10px; border-radius: 4px; }
     .stButton>button:hover { background-color: #333333; color: white; border: none; }
     </style>
     """, unsafe_allow_html=True)
@@ -122,7 +140,6 @@ uploaded_file = st.file_uploader("Upload portfolio image for batch analysis", ty
 
 if uploaded_file:
     with st.spinner("Analyzing image contours..."):
-        # Reset file pointer for re-reading if necessary
         uploaded_file.seek(0)
         asset_crops = detect_cards(uploaded_file)
     
@@ -138,7 +155,6 @@ if uploaded_file:
             for i, crop in enumerate(asset_crops):
                 with cols[i % 4]:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
-                    # Using a stable key to prevent refresh loss
                     label = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
                     if st.button(f"Commit Asset {i+1}", key=f"btn_{i}"):
@@ -150,11 +166,11 @@ if uploaded_file:
                                     "market_price": val, 
                                     "owner": owner_id
                                 }).execute()
-                                st.toast(f"Synchronized: ${val:,.2f}")
+                                st.toast(f"Synchronized: {label} at ${val:,.2f}")
                             except Exception as e:
-                                st.error(f"Sync Error: {e}")
+                                st.error(f"Sync Error: {str(e)}")
                         else:
-                            st.warning("Valuation unavailable.")
+                            st.warning("Valuation unavailable for this identifier.")
     else:
         st.warning("No clear card contours detected.")
 
@@ -172,4 +188,4 @@ if st.button("Refresh Database"):
         else:
             st.info("No records found for this ID.")
     except Exception as e:
-        st.error(f"Query failed: {e}")
+        st.error(f"Query failed: {str(e)}")
