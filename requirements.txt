@@ -5,4 +5,5 @@ supabase
 huggingface_hub
 opencv-python-headless
 numpy
-pandas
+pandashuggingface_hub
+supabase
