@@ -8,7 +8,7 @@ from huggingface_hub import InferenceClient
 from supabase import create_client
 from datetime import datetime, timedelta
 
-# --- 1. INITIALIZATION & SECURE CONNECTIVITY ---
+# --- 1. INITIALIZATION ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
@@ -25,47 +25,53 @@ supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 # --- 2. THE iOS "OBSIDIAN" DESIGN SYSTEM ---
-st.set_page_config(page_title="TraidLive | Market Audit", layout="wide")
+st.set_page_config(page_title="TraidLive | Sold Verification", layout="wide")
 
 st.markdown("""
     <style>
     .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, sans-serif; }
     div[data-testid="stMetric"] { background: rgba(28, 28, 30, 0.8); border-radius: 18px; padding: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
-    .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 12px; border: none; padding: 12px; font-weight: 600; width: 100%; }
+    .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 14px; border: none; padding: 12px; font-weight: 600; width: 100%; }
     
-    /* Data Audit Drawer */
-    .audit-container { background: #1C1C1E; border: 1px solid #3A3A3C; border-radius: 12px; padding: 15px; margin-top: 10px; }
-    .audit-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #2C2C2E; }
-    .audit-link { color: #0A84FF; text-decoration: none; font-size: 12px; }
-    .audit-price { color: #34C759; font-weight: 700; font-size: 13px; }
-    .audit-title { color: #8E8E93; font-size: 11px; max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Audit Box Styling */
+    .audit-box { 
+        background: #1C1C1E; 
+        border: 1px solid #3A3A3C; 
+        border-radius: 12px; 
+        padding: 15px; 
+        margin-top: 10px; 
+        font-size: 13px;
+    }
+    .audit-header { color: #8E8E93; font-size: 11px; text-transform: uppercase; margin-bottom: 10px; letter-spacing: 0.5px; }
+    .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2C2C2E; }
+    .sold-price { color: #34C759; font-weight: 700; }
+    .sold-link { color: #0A84FF; text-decoration: none; font-weight: 500; font-size: 14px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. REFINED MARKET AUDIT ENGINE ---
+# --- 3. THE "STRICT SOLD" ENGINE ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
     """
-    Returns: (Average Price, List of Sold Item Objects)
-    Each object contains: {'title', 'price', 'url'}
+    FORCED COMPLETED SEARCH: Filters exclusively for items with a last_sold_date.
     """
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
     try:
-        # Auth
+        # Auth Token
         token_resp = requests.post(token_url, 
                                  headers={"Authorization": f"Basic {encoded_auth}", "Content-Type": "application/x-www-form-urlencoded"}, 
                                  data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
         token = token_resp.json().get("access_token")
         
-        # 90-day lookback for strict sold data
-        lookback = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        # Look back 180 days to ensure we get data points for rare cards
+        lookback = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
         search_query = f"{card_name} {grade_filter}"
         query_encoded = requests.utils.quote(search_query)
         
-        # Hard filter for verified last_sold_date
+        # FILTER: last_sold_date:[RANGE] forces the API into the Completed index.
         ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&filter=last_sold_date:[{lookback}..]&limit=5"
         
         headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}
@@ -75,20 +81,20 @@ def fetch_market_valuation(card_name, grade_filter=""):
         
         if not items: return 0.0, []
             
-        sold_data = []
+        points = []
         for item in items:
-            sold_data.append({
-                "title": item.get("title", "Unknown Listing"),
+            points.append({
+                "title": item.get("title", "Unknown Card"),
                 "price": float(item['price']['value']),
                 "url": item.get("itemWebUrl", "#")
             })
             
-        avg_price = sum(d['price'] for d in sold_data) / len(sold_data)
-        return avg_price, sold_data
+        avg = sum(p['price'] for p in points) / len(points)
+        return avg, points
         
     except: return 0.0, []
 
-# --- 4. CORE VISION LOGIC (UNTOUCHED) ---
+# --- 4. ORIGINAL LOGIC (RESTORED) ---
 
 def auto_label_crops(crops):
     if not hf_client: return ["" for _ in crops]
@@ -125,7 +131,7 @@ def detect_cards(image_file):
 # --- 5. THE PROFESSIONAL INTERFACE ---
 
 st.title("TraidLive")
-st.markdown("##### AI Market Auditor")
+st.markdown("##### Verified Sales Auditor")
 
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
@@ -133,7 +139,7 @@ source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
 uploaded_file = st.camera_input("Snap") if source == "Camera" else st.file_uploader("", type=['jpg','jpeg','png'])
 
 if uploaded_file:
-    with st.spinner("Analyzing Vision Data..."):
+    with st.spinner("Analyzing Assets..."):
         uploaded_file.seek(0)
         asset_crops = detect_cards(uploaded_file)
     
@@ -143,12 +149,12 @@ if uploaded_file:
             if st.button("AI Batch ID"):
                 st.session_state['suggestions'] = auto_label_crops(asset_crops)
         with col_commit:
-            if 'suggestions' in st.session_state and st.button("Commit All Assets"):
+            if 'suggestions' in st.session_state and st.button("Commit All to Database"):
                 for name in st.session_state['suggestions']:
                     p_psa, _ = fetch_market_valuation(name, "PSA 10")
                     p_raw, _ = fetch_market_valuation(name, "Ungraded")
                     supabase.table("inventory").insert({"card_name": name, "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
-                st.toast("Sync Complete")
+                st.toast("Sync Complete.")
 
         if 'suggestions' in st.session_state:
             st.divider()
@@ -158,42 +164,32 @@ if uploaded_file:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     st.session_state['suggestions'][i] = st.text_input(f"ID {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
-                    if st.button(f"Verify Audit {i+1}", key=f"v_{i}"):
+                    if st.button(f"Verify Sales {i+1}", key=f"v_{i}"):
                         name = st.session_state['suggestions'][i]
-                        avg_psa, data_psa = fetch_market_valuation(name, "PSA 10")
-                        avg_raw, data_raw = fetch_market_valuation(name, "Ungraded")
                         
-                        # PSA 10 Section
-                        st.markdown(f"**PSA 10 Avg: ${avg_psa:,.2f}**")
-                        with st.container():
-                            st.markdown('<div class="audit-container">', unsafe_allow_html=True)
-                            for d in data_psa:
-                                st.markdown(f'''
-                                <div class="audit-item">
-                                    <div class="audit-title">{d['title']}</div>
-                                    <div class="audit-price">${d['price']:,.2f}</div>
-                                    <a class="audit-link" href="{d['url']}" target="_blank">View</a>
-                                </div>
-                                ''', unsafe_allow_html=True)
-                            st.markdown('</div>', unsafe_allow_html=True)
-                        
-                        # Raw Section
-                        st.markdown(f"**Raw Avg: ${avg_raw:,.2f}**")
-                        with st.container():
-                            st.markdown('<div class="audit-container">', unsafe_allow_html=True)
-                            for d in data_raw:
-                                st.markdown(f'''
-                                <div class="audit-item">
-                                    <div class="audit-title">{d['title']}</div>
-                                    <div class="audit-price">${d['price']:,.2f}</div>
-                                    <a class="audit-link" href="{d['url']}" target="_blank">View</a>
-                                </div>
-                                ''', unsafe_allow_html=True)
-                            st.markdown('</div>', unsafe_allow_html=True)
+                        # Display PSA 10 and Raw Audits
+                        for label, grade in [("PSA 10", "PSA 10"), ("RAW", "Ungraded")]:
+                            avg, points = fetch_market_valuation(name, grade)
+                            st.markdown(f"**{label} Avg: ${avg:,.2f}**")
+                            
+                            with st.container():
+                                st.markdown(f'<div class="audit-box"><div class="audit-header">{label} RECENT SALES</div>', unsafe_allow_html=True)
+                                if not points:
+                                    st.write("No verified sales found in the last 180 days.")
+                                else:
+                                    for p in points:
+                                        st.markdown(f'''
+                                        <div class="sold-row">
+                                            <span style="flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-right: 10px;">{p['title']}</span>
+                                            <span class="sold-price">${p['price']:,.2f}</span>
+                                            <a class="sold-link" href="{p['url']}" target="_blank" style="margin-left: 10px;">🔗</a>
+                                        </div>
+                                        ''', unsafe_allow_html=True)
+                                st.markdown('</div>', unsafe_allow_html=True)
 
-# Ledger
+# Ledger View
 st.divider()
-if st.button("Refresh Vault"):
+if st.button("Refresh Inventory Vault"):
     try:
         res = supabase.table("inventory").select("*").eq("owner", owner_id).order("created_at", desc=True).execute()
         if res.data:
