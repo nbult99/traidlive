@@ -23,19 +23,14 @@ def init_connections():
 supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# --- 2. MARKET & VISION LOGIC ---
+# --- 2. LOGIC MODULES (Restored for functionality) ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
-    
     try:
-        token_resp = requests.post(
-            token_url, 
-            headers={"Authorization": f"Basic {encoded_auth}", "Content-Type": "application/x-www-form-urlencoded"}, 
-            data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}
-        )
+        token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}", "Content-Type": "application/x-www-form-urlencoded"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
         token = token_resp.json().get("access_token")
         search_query = f"{card_name} {grade_filter} sold"
         query_encoded = requests.utils.quote(search_query)
@@ -58,17 +53,9 @@ def auto_label_crops(crops):
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
             prompt = "Identify this card. Return ONLY: Year, Brand, Player, Card #. No prose."
-            resp = hf_client.chat_completion(
-                model=HF_MODEL,
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]}],
-                max_tokens=50,
-            )
+            resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
             labels.append(resp.choices[0].message.content.strip())
-        except:
-            labels.append("")
+        except: labels.append("")
     return labels
 
 def detect_cards(image_file):
@@ -91,61 +78,91 @@ def detect_cards(image_file):
             crops.append(img[y:y+h, x:x+w])
     return crops
 
-# --- 3. PROFESSIONAL USER INTERFACE ---
+# --- 3. THE DARK MODE INTERFACE ---
 
-st.set_page_config(page_title="TraidLive Asset Management", layout="wide")
+st.set_page_config(page_title="TraidLive | Digital Assets", layout="wide")
 
+# iOS Dark Mode CSS Injection
 st.markdown("""
     <style>
-    .stApp { background-color: #ffffff; }
-    .stButton>button { width: 100%; background-color: #1a1a1a; color: white; border: none; padding: 10px; border-radius: 4px; }
+    /* Dark background */
+    .stApp {
+        background-color: #000000;
+        color: #FFFFFF;
+    }
+    /* Rounded Card Style for text inputs */
+    div.stTextInput > div > div > input {
+        background-color: #1C1C1E;
+        color: white;
+        border: 1px solid #3A3A3C;
+        border-radius: 10px;
+    }
+    /* iOS Style Buttons */
+    .stButton > button {
+        background-color: #0A84FF; /* iOS System Blue */
+        color: white;
+        border-radius: 12px;
+        border: none;
+        padding: 10px 24px;
+        font-weight: 600;
+        transition: all 0.2s ease;
+    }
+    .stButton > button:hover {
+        background-color: #409CFF;
+        color: white;
+        transform: scale(1.02);
+    }
+    /* Dataframe styling */
+    .stDataFrame {
+        background-color: #1C1C1E;
+        border-radius: 15px;
+    }
+    /* Header fonts */
+    h1, h2, h3 {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+    }
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background-color: #1C1C1E;
+        border-right: 1px solid #3A3A3C;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("TraidLive Asset Management")
+st.title("TraidLive")
+st.write("Market Intelligence Dashboard")
+
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 
-uploaded_file = st.file_uploader("Upload portfolio image (Max 8 cards)", type=['jpg', 'jpeg', 'png'])
+uploaded_file = st.file_uploader("Upload Collection Image", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("Analyzing image contours..."):
+    with st.spinner("Analyzing image..."):
         uploaded_file.seek(0)
         asset_crops = detect_cards(uploaded_file)
     
     if asset_crops:
-        st.info(f"Analysis complete: {len(asset_crops)} assets identified.")
+        st.info(f"{len(asset_crops)} assets detected in frame.")
         
         # Action Buttons
         col_ai, col_commit_all = st.columns(2)
         
         with col_ai:
-            if st.button("Run AI Batch Identification"):
-                with st.spinner("Querying Vision Model..."):
+            if st.button("AI Batch Identification"):
+                with st.spinner("Processing..."):
                     st.session_state['suggestions'] = auto_label_crops(asset_crops)
 
         with col_commit_all:
-            # ONLY SHOW if AI has already suggested names
             if 'suggestions' in st.session_state:
-                if st.button("Commit All Assets to Database"):
-                    with st.spinner("Batch processing market values and syncing..."):
-                        success_count = 0
+                if st.button("Commit All to Inventory"):
+                    with st.spinner("Synchronizing..."):
                         for i, name in enumerate(st.session_state['suggestions']):
-                            # Retrieve values for each
                             psa_val = fetch_market_valuation(name, "PSA 10")
                             raw_val = fetch_market_valuation(name, "Ungraded")
-                            
-                            try:
-                                supabase.table("inventory").insert({
-                                    "card_name": name, 
-                                    "psa_10_price": psa_val,
-                                    "ungraded_price": raw_val,
-                                    "owner": owner_id
-                                }).execute()
-                                success_count += 1
-                            except:
-                                st.error(f"Failed to sync asset {i+1}: {name}")
-                        
-                        st.success(f"Successfully committed {success_count} assets.")
+                            supabase.table("inventory").insert({"card_name": name, "psa_10_price": psa_val, "ungraded_price": raw_val, "owner": owner_id}).execute()
+                        st.success("Batch successfully committed.")
 
         if 'suggestions' in st.session_state:
             st.divider()
@@ -153,20 +170,7 @@ if uploaded_file:
             for i, crop in enumerate(asset_crops):
                 with cols[i % 4]:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
-                    # Allow user to tweak AI suggestions before committing
-                    st.session_state['suggestions'][i] = st.text_input(f"Identifier {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
-                    
-                    if st.button(f"Commit Asset {i+1} Individually", key=f"btn_{i}"):
-                        psa_val = fetch_market_valuation(st.session_state['suggestions'][i], "PSA 10")
-                        raw_val = fetch_market_valuation(st.session_state['suggestions'][i], "Ungraded")
-                        supabase.table("inventory").insert({
-                            "card_name": st.session_state['suggestions'][i], 
-                            "psa_10_price": psa_val,
-                            "ungraded_price": raw_val,
-                            "owner": owner_id
-                        }).execute()
-                        st.toast(f"Synchronized: {st.session_state['suggestions'][i]}")
-
+                    st.session_state['suggestions'][i] = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
     else:
         st.warning("No card contours detected.")
 
@@ -178,10 +182,8 @@ if st.button("Refresh Database"):
         response = supabase.table("inventory").select("*").eq("owner", owner_id).order("created_at", desc=True).execute()
         if response.data:
             df = pd.DataFrame(response.data)
-            cols_to_show = ['card_name', 'ungraded_price', 'psa_10_price', 'created_at']
-            available_cols = [c for c in cols_to_show if c in df.columns]
-            df_display = df[available_cols]
-            df_display.columns = ['Asset Name', 'Ungraded Val', 'PSA 10 Val', 'Sync Date']
-            st.dataframe(df_display, use_container_width=True)
+            df = df[['card_name', 'ungraded_price', 'psa_10_price', 'created_at']]
+            df.columns = ['Asset Name', 'Ungraded Val', 'PSA 10 Val', 'Sync Date']
+            st.dataframe(df, use_container_width=True)
     except Exception as e:
         st.error(f"Query failed: {str(e)}")
