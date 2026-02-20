@@ -7,8 +7,7 @@ import pandas as pd
 from huggingface_hub import InferenceClient
 from supabase import create_client
 
-# --- 1. INITIALIZATION & SECURE CONNECTIVITY ---
-
+# --- 1. INITIALIZATION ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
@@ -24,10 +23,10 @@ def init_connections():
 supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# --- 2. CORE LOGIC MODULES ---
+# --- 2. MARKET & VISION LOGIC ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
-    """Targeted marketplace searches for SOLD items via eBay Production API."""
+    """Targeted marketplace searches for SOLD items via eBay API."""
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
@@ -40,7 +39,7 @@ def fetch_market_valuation(card_name, grade_filter=""):
         )
         token = token_resp.json().get("access_token")
         
-        # Searching specifically for SOLD listings with the grade filter
+        # Keyword-based search for 'sold' history
         search_query = f"{card_name} {grade_filter} sold"
         query_encoded = requests.utils.quote(search_query)
         
@@ -58,7 +57,7 @@ def fetch_market_valuation(card_name, grade_filter=""):
         return 0.0
 
 def auto_label_crops(crops):
-    """Vision AI Identification for Batch Assets."""
+    """Batch identification using Vision AI."""
     if not hf_client: return ["" for _ in crops]
     labels = []
     for crop in crops:
@@ -80,26 +79,30 @@ def auto_label_crops(crops):
     return labels
 
 def detect_cards(image_file):
-    """Computer Vision detection standardized at 1200px."""
+    """Advanced detection for high-density multi-card photos."""
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
     
-    # 1200px resize optimizes contour detection for standard card ratios
     ratio = 1200.0 / img.shape[0]
     img = cv2.resize(img, (int(img.shape[1] * ratio), 1200))
     
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (7,7), 0)
-    thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    # Canny edge detection catches smaller cards better in group shots
+    edged = cv2.Canny(blur, 30, 150)
+    
+    # Dilation closes gaps in card borders for cleaner contours
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+    dilated = cv2.dilate(edged, kernel, iterations=2)
+    
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     crops = []
-    # Identify top 8 rectangular regions based on surface area
+    # Sorted by area; accepting up to 8 cards with a lower 3000px threshold
     for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:8]:
         peri = cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        # Ensure contour is a 4-sided polygon with sufficient area
-        if len(approx) == 4 and cv2.contourArea(cnt) > 8000:
+        if len(approx) == 4 and cv2.contourArea(cnt) > 3000:
             x, y, w, h = cv2.boundingRect(approx)
             crops.append(img[y:y+h, x:x+w])
     return crops
@@ -112,14 +115,13 @@ st.markdown("""
     <style>
     .stApp { background-color: #ffffff; }
     .stButton>button { width: 100%; background-color: #1a1a1a; color: white; border: none; padding: 10px; border-radius: 4px; }
-    .stButton>button:hover { background-color: #333333; color: white; border: none; }
     </style>
     """, unsafe_allow_html=True)
 
 st.title("TraidLive Asset Management")
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 
-uploaded_file = st.file_uploader("Upload portfolio image for batch analysis (Max 8 assets)", type=['jpg', 'jpeg', 'png'])
+uploaded_file = st.file_uploader("Upload portfolio image for batch analysis (Max 8 cards)", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
     with st.spinner("Analyzing image contours..."):
@@ -127,19 +129,17 @@ if uploaded_file:
         asset_crops = detect_cards(uploaded_file)
     
     if asset_crops:
-        st.info(f"Analysis complete: {len(asset_crops)} assets identified.")
-        
+        st.success(f"Identification complete: {len(asset_crops)} assets identified.")
         if st.button("Run AI Batch Identification"):
-            with st.spinner("Querying Vision Model for all assets..."):
+            with st.spinner("Querying Vision Model..."):
                 st.session_state['suggestions'] = auto_label_crops(asset_crops)
 
         if 'suggestions' in st.session_state:
-            # Displays up to 8 cards in a clean professional grid
             cols = st.columns(4)
             for i, crop in enumerate(asset_crops):
                 with cols[i % 4]:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
-                    label = st.text_input(f"Identifier {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
+                    label = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
                     if st.button(f"Commit Asset {i+1}", key=f"btn_{i}"):
                         with st.spinner(f"Valuing {label}..."):
@@ -158,19 +158,22 @@ if uploaded_file:
                         except Exception as e:
                             st.error(f"Sync Error: {str(e)}")
     else:
-        st.warning("No card contours detected. Check contrast and lighting.")
+        st.warning("No card contours detected. Try moving the camera closer or improving background contrast.")
 
-# --- 4. INVENTORY LEDGER ---
+# --- 4. INVENTORY RECORD ---
 st.divider()
 st.subheader("Inventory Ledger")
-if st.button("Refresh Database Records"):
-    response = supabase.table("inventory").select("*").eq("owner", owner_id).order("created_at", desc=True).execute()
-    if response.data:
-        df = pd.DataFrame(response.data)
-        cols_to_show = ['card_name', 'ungraded_price', 'psa_10_price', 'created_at']
-        available_cols = [c for c in cols_to_show if c in df.columns]
-        df_display = df[available_cols]
-        df_display.columns = ['Asset Name', 'Ungraded Val', 'PSA 10 Val', 'Sync Date']
-        st.dataframe(df_display, use_container_width=True)
-    else:
-        st.info("No records found for this Customer ID.")
+if st.button("Refresh Database"):
+    try:
+        response = supabase.table("inventory").select("*").eq("owner", owner_id).order("created_at", desc=True).execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            cols_to_show = ['card_name', 'ungraded_price', 'psa_10_price', 'created_at']
+            available_cols = [c for c in cols_to_show if c in df.columns]
+            df_display = df[available_cols]
+            df_display.columns = ['Asset Name', 'Ungraded Val', 'PSA 10 Val', 'Sync Date']
+            st.dataframe(df_display, use_container_width=True)
+        else:
+            st.info("No records found.")
+    except Exception as e:
+        st.error(f"Query failed: {str(e)}")
