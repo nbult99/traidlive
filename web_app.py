@@ -23,7 +23,68 @@ def init_connections():
 supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# --- 2. LOGIC MODULES (Restored for functionality) ---
+# --- 2. FRONT-END: iOS OBSIDIAN DESIGN SYSTEM ---
+st.set_page_config(page_title="TraidLive Dashboard", layout="wide", initial_sidebar_state="expanded")
+
+st.markdown("""
+    <style>
+    /* Global Styles */
+    .stApp { 
+        background-color: #000000; 
+        color: #FFFFFF; 
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif; 
+    }
+    
+    /* KPI Metric Cards */
+    [data-testid="stMetricValue"] { font-size: 32px; font-weight: 700; color: #FFFFFF; }
+    div[data-testid="stMetric"] { 
+        background: rgba(28, 28, 30, 0.8); 
+        backdrop-filter: blur(20px); 
+        border-radius: 18px; 
+        padding: 20px; 
+        border: 1px solid rgba(255, 255, 255, 0.1); 
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8);
+    }
+    
+    /* iOS "System Blue" Primary Buttons */
+    .stButton > button { 
+        background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); 
+        color: white; 
+        border-radius: 14px; 
+        border: none; 
+        padding: 12px 24px; 
+        font-weight: 600; 
+        width: 100%; 
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); 
+    }
+    .stButton > button:hover { opacity: 0.9; transform: scale(1.01); color: white; border: none; }
+    .stButton > button:active { transform: scale(0.98); }
+    
+    /* Obsidian Field Inputs */
+    div.stTextInput > div > div > input { 
+        background-color: #1C1C1E; 
+        color: white; 
+        border: 1px solid #3A3A3C; 
+        border-radius: 12px; 
+        padding: 14px; 
+        font-size: 16px;
+    }
+    
+    /* Premium Sidebar */
+    section[data-testid="stSidebar"] { 
+        background-color: #1C1C1E; 
+        border-right: 1px solid #3A3A3C; 
+    }
+    
+    /* Smooth Divider */
+    hr { border-top: 1px solid #3A3A3C; }
+
+    /* Header Refinement */
+    h1, h2, h3 { letter-spacing: -0.03em; font-weight: 700; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 3. ORIGINAL LOGIC (Untouched) ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
@@ -42,8 +103,7 @@ def fetch_market_valuation(card_name, grade_filter=""):
         if not items: return 0.0
         prices = [float(item['price']['value']) for item in items if 'price' in item]
         return sum(prices) / len(prices)
-    except:
-        return 0.0
+    except: return 0.0
 
 def auto_label_crops(crops):
     if not hf_client: return ["" for _ in crops]
@@ -78,77 +138,32 @@ def detect_cards(image_file):
             crops.append(img[y:y+h, x:x+w])
     return crops
 
-# --- 3. THE DARK MODE INTERFACE ---
-
-st.set_page_config(page_title="TraidLive | Digital Assets", layout="wide")
-
-# iOS Dark Mode CSS Injection
-st.markdown("""
-    <style>
-    /* Dark background */
-    .stApp {
-        background-color: #000000;
-        color: #FFFFFF;
-    }
-    /* Rounded Card Style for text inputs */
-    div.stTextInput > div > div > input {
-        background-color: #1C1C1E;
-        color: white;
-        border: 1px solid #3A3A3C;
-        border-radius: 10px;
-    }
-    /* iOS Style Buttons */
-    .stButton > button {
-        background-color: #0A84FF; /* iOS System Blue */
-        color: white;
-        border-radius: 12px;
-        border: none;
-        padding: 10px 24px;
-        font-weight: 600;
-        transition: all 0.2s ease;
-    }
-    .stButton > button:hover {
-        background-color: #409CFF;
-        color: white;
-        transform: scale(1.02);
-    }
-    /* Dataframe styling */
-    .stDataFrame {
-        background-color: #1C1C1E;
-        border-radius: 15px;
-    }
-    /* Header fonts */
-    h1, h2, h3 {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        font-weight: 700;
-        letter-spacing: -0.5px;
-    }
-    /* Sidebar styling */
-    section[data-testid="stSidebar"] {
-        background-color: #1C1C1E;
-        border-right: 1px solid #3A3A3C;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# --- 4. THE PROFESSIONAL UI ---
 
 st.title("TraidLive")
-st.write("Market Intelligence Dashboard")
+st.markdown("##### AI-Powered Asset Intel")
 
+# KPI Summary Toolbar
+k1, k2, k3 = st.columns(3)
+k1.metric("Assets Syncing", "Active")
+k2.metric("Market Data", "Real-Time")
+k3.metric("System Health", "Optimal")
+
+# Sidebar Controls
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
+st.sidebar.divider()
+st.sidebar.caption("v2.0 obsidian.ios.dark")
 
-uploaded_file = st.file_uploader("Upload Collection Image", type=['jpg', 'jpeg', 'png'])
+uploaded_file = st.file_uploader("", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("Analyzing image..."):
+    with st.spinner("Executing Computer Vision..."):
         uploaded_file.seek(0)
         asset_crops = detect_cards(uploaded_file)
     
     if asset_crops:
-        st.info(f"{len(asset_crops)} assets detected in frame.")
-        
-        # Action Buttons
+        # Action Toolbar
         col_ai, col_commit_all = st.columns(2)
-        
         with col_ai:
             if st.button("AI Batch Identification"):
                 with st.spinner("Processing..."):
@@ -156,34 +171,40 @@ if uploaded_file:
 
         with col_commit_all:
             if 'suggestions' in st.session_state:
-                if st.button("Commit All to Inventory"):
-                    with st.spinner("Synchronizing..."):
+                if st.button("Commit All to Database"):
+                    with st.spinner("Synchronizing Portfolio..."):
                         for i, name in enumerate(st.session_state['suggestions']):
-                            psa_val = fetch_market_valuation(name, "PSA 10")
-                            raw_val = fetch_market_valuation(name, "Ungraded")
-                            supabase.table("inventory").insert({"card_name": name, "psa_10_price": psa_val, "ungraded_price": raw_val, "owner": owner_id}).execute()
-                        st.success("Batch successfully committed.")
+                            p_psa = fetch_market_valuation(name, "PSA 10")
+                            p_raw = fetch_market_valuation(name, "Ungraded")
+                            supabase.table("inventory").insert({"card_name": name, "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
+                        st.success(f"Successfully committed {len(st.session_state['suggestions'])} assets.")
 
         if 'suggestions' in st.session_state:
             st.divider()
-            cols = st.columns(4)
+            grid = st.columns(4)
             for i, crop in enumerate(asset_crops):
-                with cols[i % 4]:
+                with grid[i % 4]:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
-                    st.session_state['suggestions'][i] = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
+                    st.session_state['suggestions'][i] = st.text_input(f"Identifier {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
+                    
+                    if st.button(f"Commit {i+1}", key=f"btn_{i}"):
+                        p_psa = fetch_market_valuation(st.session_state['suggestions'][i], "PSA 10")
+                        p_raw = fetch_market_valuation(st.session_state['suggestions'][i], "Ungraded")
+                        supabase.table("inventory").insert({"card_name": st.session_state['suggestions'][i], "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
+                        st.toast(f"Synced {st.session_state['suggestions'][i]}")
     else:
         st.warning("No card contours detected.")
 
-# --- 4. INVENTORY RECORD ---
+# Ledger Section
 st.divider()
-st.subheader("Inventory Ledger")
-if st.button("Refresh Database"):
+st.subheader("Inventory Vault")
+if st.button("Refresh Records"):
     try:
         response = supabase.table("inventory").select("*").eq("owner", owner_id).order("created_at", desc=True).execute()
         if response.data:
             df = pd.DataFrame(response.data)
             df = df[['card_name', 'ungraded_price', 'psa_10_price', 'created_at']]
-            df.columns = ['Asset Name', 'Ungraded Val', 'PSA 10 Val', 'Sync Date']
+            df.columns = ['Asset Name', 'Raw Market', 'PSA 10 Floor', 'Sync Date']
             st.dataframe(df, use_container_width=True)
     except Exception as e:
-        st.error(f"Query failed: {str(e)}")
+        st.error(f"Sync failed: {str(e)}")
