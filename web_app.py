@@ -26,10 +26,7 @@ HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 # --- 2. MARKET ANALYSIS MODULES ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
-    """
-    Executes targeted marketplace searches.
-    grade_filter: "PSA 10" or "Ungraded"
-    """
+    """targeted marketplace searches for Sold items."""
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
@@ -42,7 +39,7 @@ def fetch_market_valuation(card_name, grade_filter=""):
         )
         token = token_resp.json().get("access_token")
         
-        # Refine search query with 'sold' and grade keywords
+        # Searching specifically for SOLD listings with the grade filter
         search_query = f"{card_name} {grade_filter} sold"
         query_encoded = requests.utils.quote(search_query)
         
@@ -54,19 +51,19 @@ def fetch_market_valuation(card_name, grade_filter=""):
         items = data.get("itemSummaries", [])
         
         if not items: return 0.0
-            
         prices = [float(item['price']['value']) for item in items if 'price' in item]
         return sum(prices) / len(prices)
     except:
         return 0.0
 
 def auto_label_crops(crops):
+    if not hf_client: return ["" for _ in crops]
     labels = []
     for crop in crops:
         try:
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
-            prompt = "Identify this card. Return ONLY: Year, Brand, Player, Card #."
+            prompt = "Identify this card. Return ONLY: Year, Brand, Player, Card #. No prose."
             resp = hf_client.chat_completion(
                 model=HF_MODEL,
                 messages=[{"role": "user", "content": [
@@ -79,6 +76,25 @@ def auto_label_crops(crops):
         except:
             labels.append("")
     return labels
+
+def detect_cards(image_file):
+    """Standardized 1200px detection logic."""
+    file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+    ratio = 1200.0 / img.shape[0]
+    img = cv2.resize(img, (int(img.shape[1] * ratio), 1200))
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (7,7), 0)
+    thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    crops = []
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:8]:
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+        if len(approx) == 4 and cv2.contourArea(cnt) > 8000:
+            x, y, w, h = cv2.boundingRect(approx)
+            crops.append(img[y:y+h, x:x+w])
+    return crops
 
 # --- 3. PROFESSIONAL INTERFACE ---
 
@@ -97,44 +113,49 @@ owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 uploaded_file = st.file_uploader("Upload portfolio image", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    # (Insert detect_cards logic from previous version here)
-    asset_crops = [] # Placeholder for detection results
+    with st.spinner("Analyzing image contours..."):
+        # Reset file pointer for re-reading
+        uploaded_file.seek(0)
+        asset_crops = detect_cards(uploaded_file)
     
-    if st.button("Analyze Assets"):
-        st.session_state['suggestions'] = auto_label_crops(asset_crops)
+    if asset_crops:
+        st.info(f"Analysis complete: {len(asset_crops)} assets identified.")
+        if st.button("Run AI Identification"):
+            with st.spinner("Querying Vision Model..."):
+                st.session_state['suggestions'] = auto_label_crops(asset_crops)
 
-    if 'suggestions' in st.session_state:
-        cols = st.columns(4)
-        for i, crop in enumerate(asset_crops):
-            with cols[i % 4]:
-                st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
-                label = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
-                
-                if st.button(f"Commit Asset {i+1}", key=f"btn_{i}"):
-                    # Dual Valuation Triage
-                    psa_val = fetch_market_valuation(label, "PSA 10")
-                    raw_val = fetch_market_valuation(label, "Ungraded")
+        if 'suggestions' in st.session_state:
+            cols = st.columns(4)
+            for i, crop in enumerate(asset_crops):
+                with cols[i % 4]:
+                    st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
+                    label = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
-                    try:
-                        supabase.table("inventory").insert({
-                            "card_name": label, 
-                            "psa_10_price": psa_val,
-                            "ungraded_price": raw_val,
-                            "owner": owner_id
-                        }).execute()
-                        st.toast(f"Synchronized: {label}")
-                        st.write(f"PSA 10: ${psa_val:,.2f} | Raw: ${raw_val:,.2f}")
-                    except Exception as e:
-                        st.error(f"Sync Error: {str(e)}")
+                    if st.button(f"Commit Asset {i+1}", key=f"btn_{i}"):
+                        psa_val = fetch_market_valuation(label, "PSA 10")
+                        raw_val = fetch_market_valuation(label, "Ungraded")
+                        
+                        try:
+                            supabase.table("inventory").insert({
+                                "card_name": label, 
+                                "psa_10_price": psa_val,
+                                "ungraded_price": raw_val,
+                                "owner": owner_id
+                            }).execute()
+                            st.toast(f"Synchronized: {label}")
+                        except Exception as e:
+                            st.error(f"Sync Error: {str(e)}")
+    else:
+        st.warning("No card contours detected. Check lighting.")
 
 # --- 4. INVENTORY RECORD ---
 st.divider()
 st.subheader("Inventory Ledger")
 if st.button("Refresh Database"):
-    response = supabase.table("inventory").select("*").eq("owner", owner_id).execute()
+    response = supabase.table("inventory").select("*").eq("owner", owner_id).order("created_at", desc=True).execute()
     if response.data:
         df = pd.DataFrame(response.data)
-        # Select and rename columns for professional report
-        df = df[['card_name', 'ungraded_price', 'psa_10_price', 'created_at']]
-        df.columns = ['Asset Name', 'Ungraded Val', 'PSA 10 Val', 'Sync Date']
-        st.dataframe(df, use_container_width=True)
+        # Handle columns safely if they are empty
+        cols_to_show = ['card_name', 'ungraded_price', 'psa_10_price', 'created_at']
+        available_cols = [c for c in cols_to_show if c in df.columns]
+        st.dataframe(df[available_cols], use_container_width=True)
