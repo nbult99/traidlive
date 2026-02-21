@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import base64
 import pandas as pd
-import requests as standard_requests # For the PSA API
+import requests as standard_requests 
 from huggingface_hub import InferenceClient
 from supabase import create_client
 import urllib.parse
@@ -35,9 +35,6 @@ st.markdown("""
     div[data-testid="stMetric"] { background: rgba(28, 28, 30, 0.8); border-radius: 18px; padding: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
     .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 12px; border: none; padding: 12px; font-weight: 600; width: 100%; }
     
-    /* PSA Badge Styling */
-    .psa-badge { color: #34C759; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }
-    
     /* Audit Box Styling */
     .audit-box { background: #1C1C1E; border: 1px solid #3A3A3C; border-radius: 12px; padding: 15px; margin-top: 10px; font-size: 13px; }
     .audit-header { color: #8E8E93; font-size: 11px; text-transform: uppercase; margin-bottom: 10px; letter-spacing: 0.5px; }
@@ -50,12 +47,12 @@ st.markdown("""
 # --- 3. MARKET PRICING SCRAPER (ACTIVE LISTINGS) ---
 def fetch_market_valuation(card_name, grade_filter=""):
     try:
-        # Strip out the verification badge so it doesn't mess up the eBay search
-        clean_name = card_name.replace("✅ [PSA VERIFIED]", "").strip()
+        # Strip out the verification badges so it doesn't mess up the eBay search keywords
+        clean_name = card_name.replace("✅ [PSA VERIFIED]", "").replace("❌ [Not PSA verified]", "").strip()
         search_query = f"{clean_name} {grade_filter}".strip()
         encoded_query = urllib.parse.quote(search_query)
         
-        # Removed the completed/sold parameters to default to active listings
+        # Default to active listings
         url = f"https://www.ebay.com/sch/i.html?_nkw={encoded_query}"
         scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
         resp = scraper.get(url, timeout=15)
@@ -77,7 +74,8 @@ def fetch_market_valuation(card_name, grade_filter=""):
             clean_url = item_url.split('?')[0] if '?' in item_url else item_url
             
             points.append({"title": title_tag.text.replace("NEW LISTING", "").strip(), "price": clean_price, "url": clean_url})
-            # Increased limit to 10 data points
+            
+            # Increase data points to 10
             if len(points) >= 10: break
                 
         if not points: return 0.0, []
@@ -86,11 +84,11 @@ def fetch_market_valuation(card_name, grade_filter=""):
     except Exception as e:
         return 0.0, []
 
-# --- 4. PSA VERIFICATION LOGIC ---
+# --- 4. CORE VISION & PSA VERIFICATION LOGIC ---
 def verify_psa_cert(cert_number):
-    """Hits the official PSA API to verify the slab and get exact details."""
+    """Hits the official PSA API to verify if the cert number is valid."""
     if not PSA_TOKEN or not cert_number.isdigit():
-        return None
+        return False
         
     url = f"https://api.psacard.com/publicapi/cert/GetByCertNumber/{cert_number}"
     headers = {"Authorization": f"bearer {PSA_TOKEN}"}
@@ -99,18 +97,10 @@ def verify_psa_cert(cert_number):
         resp = standard_requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            cert_data = data.get("PSACert", {})
-            if cert_data:
-                year = cert_data.get("Year", "")
-                brand = cert_data.get("Brand", "") 
-                subject = cert_data.get("Subject", "")
-                grade = cert_data.get("GradeDescription", "")
-                
-                full_title = f"{year} {brand} {subject} - {grade}".strip()
-                return f"✅ [PSA VERIFIED] {full_title}"
-        return None
+            return data.get("PSACert", {}).get("CertNumber") is not None
+        return False
     except:
-        return None
+        return False
 
 def auto_label_crops(crops):
     if not hf_client: return ["" for _ in crops]
@@ -120,20 +110,29 @@ def auto_label_crops(crops):
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
             
-            prompt = "Read the numeric PSA certification number on this graded card slab. It is usually a 7 or 8 digit number near the barcode. Return ONLY the numbers, no other text."
+            # Original name extraction + hidden cert extraction
+            prompt = "Identify this card. First line: Year, Brand, Player, Card #. Second line: If it is a graded PSA slab, output the 7 or 8 digit numeric certification number. If not, output 'NONE'."
             resp = hf_client.chat_completion(
                 model=HF_MODEL, 
                 messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], 
-                max_tokens=15
+                max_tokens=60
             )
-            cert_num = resp.choices[0].message.content.strip()
             
-            psa_result = verify_psa_cert(cert_num)
+            result = resp.choices[0].message.content.strip().split('\n')
+            card_name = result[0].strip()
             
-            if psa_result:
-                labels.append(psa_result)
+            cert_num = ""
+            if len(result) > 1:
+                cert_num = ''.join(filter(str.isdigit, result[1]))
+            
+            # Apply the badge based on API ping
+            if cert_num and len(cert_num) >= 7:
+                if verify_psa_cert(cert_num):
+                    labels.append(f"{card_name} ✅ [PSA VERIFIED]")
+                else:
+                    labels.append(f"{card_name} ❌ [Not PSA verified]")
             else:
-                labels.append(f"Cert Check Failed: {cert_num}")
+                labels.append(f"{card_name} ❌ [Not PSA verified]")
                 
         except: labels.append("Vision Error")
     return labels
@@ -160,7 +159,7 @@ def detect_cards(image_file):
 
 # --- 5. THE PROFESSIONAL INTERFACE ---
 st.title("TraidLive")
-st.markdown("##### PSA Verified Portfolio")
+st.markdown("##### AI Portfolio Manager")
 
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 
@@ -184,7 +183,7 @@ k3.metric("Assets in Vault", asset_count)
 st.divider()
 
 source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
-uploaded_file = st.camera_input("Snap Slab") if source == "Camera" else st.file_uploader("", type=['jpg','jpeg','png'])
+uploaded_file = st.camera_input("Snap Card") if source == "Camera" else st.file_uploader("", type=['jpg','jpeg','png'])
 
 if uploaded_file:
     with st.spinner("Analyzing Assets..."):
@@ -194,12 +193,13 @@ if uploaded_file:
     if asset_crops:
         col_ai, col_commit = st.columns(2)
         with col_ai:
-            if st.button("Scan PSA Certs"):
+            if st.button("AI Batch ID"):
                 st.session_state['suggestions'] = auto_label_crops(asset_crops)
         with col_commit:
             if 'suggestions' in st.session_state and st.button("Commit All to Database"):
                 for name in st.session_state['suggestions']:
-                    db_name = name.replace("✅ [PSA VERIFIED]", "").strip()
+                    # Clean the badges off before saving to the database
+                    db_name = name.replace("✅ [PSA VERIFIED]", "").replace("❌ [Not PSA verified]", "").strip()
                     p_psa, _ = fetch_market_valuation(db_name, "PSA 10")
                     p_raw, _ = fetch_market_valuation(db_name, "Ungraded")
                     supabase.table("inventory").insert({"card_name": db_name, "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
@@ -212,21 +212,15 @@ if uploaded_file:
             for i, crop in enumerate(asset_crops):
                 with grid[i % 4]:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
-                    
-                    val = st.session_state['suggestions'][i]
-                    if "✅ [PSA VERIFIED]" in val:
-                        st.markdown(f'<p class="psa-badge">{val}</p>', unsafe_allow_html=True)
-                        clean_val = val.replace("✅ [PSA VERIFIED]", "").strip()
-                    else:
-                        clean_val = st.text_input(f"ID {i+1}", value=val, key=f"inp_{i}")
+                    st.session_state['suggestions'][i] = st.text_input(f"ID {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
                     if st.button(f"Get Live Prices {i+1}", key=f"v_{i}"):
+                        name = st.session_state['suggestions'][i]
                         for label, grade in [("PSA 10", "PSA 10"), ("RAW", "Ungraded")]:
-                            avg, points = fetch_market_valuation(clean_val, grade)
+                            avg, points = fetch_market_valuation(name, grade)
                             st.markdown(f"**{label} Avg: ${avg:,.2f}**")
                             
                             with st.container():
-                                # Updated UI Header to reflect Active Listings
                                 st.markdown(f'<div class="audit-box"><div class="audit-header">{label} ACTIVE LISTINGS</div>', unsafe_allow_html=True)
                                 if not points:
                                     st.write("No active listings found.")
