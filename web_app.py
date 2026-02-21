@@ -43,27 +43,30 @@ footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. CORE ENGINES ---
-def fetch_market_valuation(raw_input, grade_filter=""):
+# --- 3. THE UNIVERSAL SANITIZER ---
+def sanitize_card_name(raw_input):
+    """Force-cleans any dictionary artifacts out of the search string."""
+    clean = str(raw_input)
+    # If it's a real dictionary, grab the 'full' key
+    if isinstance(raw_input, dict):
+        clean = raw_input.get('full', str(raw_input))
+    
+    # Shred dictionary syntax characters
+    for artifact in ["{", "}", "'", ":", "full", "year", "brand", "player", "num"]:
+        clean = clean.replace(artifact, "")
+    return clean.strip()
+
+# --- 4. CORE ENGINES ---
+def fetch_market_valuation(clean_name, grade_filter=""):
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
-    # --- SANITY PURGE ---
-    # This force-cleans the input if it's a dictionary or contains dict characters
-    clean_name = str(raw_input)
-    if isinstance(raw_input, dict):
-        clean_name = raw_input.get('full', str(raw_input))
-    
-    # Remove all possible dictionary artifacts
-    for char in ["{", "}", "'", ":", "full", "year", "brand", "player", "num"]:
-        clean_name = clean_name.replace(char, "")
-    clean_name = clean_name.strip()
-
     try:
         token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
         token = token_resp.json().get("access_token")
         
+        # Build search query for SOLD listings
         search_query = f"{clean_name} {grade_filter} sold -reprint -rp"
         if grade_filter == "Ungraded":
             search_query = f"{clean_name} sold -PSA -BGS -SGC -CGC -graded -reprint"
@@ -96,8 +99,7 @@ def auto_label_crops(crops):
         try:
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
-            # Absolute instruction to return a string, not code
-            prompt = "Return ONLY the Year, Brand, Player, and Card # as a single line. Example: 2000 Bowman Tom Brady 236. NO DICTIONARIES, NO BRACES."
+            prompt = "Return ONLY the Year, Brand, Player, and Card # as a single line. Example: 2000 Bowman Tom Brady 236. NO DICTIONARIES."
             resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
             labels.append(resp.choices[0].message.content.strip())
         except: labels.append("ID Error")
@@ -122,20 +124,33 @@ def detect_cards(image_file):
             crops.append(img_work[y1:y2, x1:x2])
     return crops
 
-def display_pricing_table(name):
+def display_pricing_table(raw_name):
+    # Sanitize once at the start of display
+    clean_name = sanitize_card_name(raw_name)
     html_rows = ""
-    for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("PSA 7", "PSA 7"), ("RAW", "Ungraded")]:
-        val, points = fetch_market_valuation(name, gr_query)
+    
+    for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("RAW", "Ungraded")]:
+        val, points = fetch_market_valuation(clean_name, gr_query)
         if points:
             list_html = "".join([f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a href='{p['url']}' target='_blank' style='color:#0A84FF; text-decoration:none;'>Link</a></div>" for p in points])
+            
+            # --- FIXED ACTIVE LISTING LINK ---
+            # We encode the clean name + the grade for the active search link
+            active_search_query = f"{clean_name} {gr_query}"
+            if gr_query == "Ungraded": active_search_query = f"{clean_name} -graded"
+            
+            active_link = f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(active_search_query)}"
+            
+            list_html += f"<div style='margin-top:10px;'><a href='{active_link}' target='_blank' style='color:#000; background:#FFF; text-decoration:none; font-weight:700; padding:8px; border-radius:5px; display:block; text-align:center;'>🔍 View Active Listings</a></div>"
+            
             html_rows += f"<tr><td style='padding:10px 0;'><strong>{label}</strong></td><td style='text-align:right;'><details><summary style='color:#00C805; font-weight:bold;'>${val:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{list_html}</div></details></td></tr>"
     
     if html_rows:
         st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:15px; border:1px solid #30363D; margin-top:10px;'><table style='width:100%; border-collapse:collapse;'>{html_rows}</table></div>", unsafe_allow_html=True)
     else:
-        st.warning(f"No listings found.")
+        st.warning(f"Market analysis failed for: {clean_name}")
 
-# --- 4. INTERFACE ---
+# --- 5. INTERFACE ---
 st.markdown("""<div class="nav-container">
 <a class="nav-item" href="/?page=Home">Home</a>
 <a class="nav-item" href="/?page=Inventory">Inventory</a>
@@ -147,16 +162,14 @@ page = st.query_params.get("page", "Home")
 
 if page == "Home":
     st.title("TraidLive")
-    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.4 | Dictionary Purge Active</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.5 | Active Link Logic Fixed</h3>", unsafe_allow_html=True)
     
-    # 1. TEXT SEARCH
     search_q = st.text_input("Quick Lookup", placeholder="e.g. 2000 Bowman Tom Brady 236")
     if search_q and st.button("GET MARKET DATA"):
         display_pricing_table(search_q)
 
     st.divider()
 
-    # 2. SCANNER
     input_type = st.radio("Input Method", ["Search with Text", "Upload Image"], horizontal=True)
 
     if input_type == "Upload Image":
@@ -176,9 +189,7 @@ if page == "Home":
                 for i, name in enumerate(st.session_state['scan_results']):
                     with grid[i % 4]:
                         st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
-                        # The user can now manually delete the dict if it appears, 
-                        # but our backend will clean it anyway.
-                        st.session_state['scan_results'][i] = st.text_input(f"Asset {i+1}", value=str(name), key=f"sn_{i}")
+                        st.session_state['scan_results'][i] = st.text_input(f"Asset {i+1}", value=sanitize_card_name(name), key=f"sn_{i}")
                         if st.button(f"Analyze {i+1}", key=f"sp_{i}"):
                             display_pricing_table(st.session_state['scan_results'][i])
 
