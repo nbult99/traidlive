@@ -60,15 +60,12 @@ def fetch_market_valuation(clean_name, grade_filter=""):
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
     # --- 1. SMART ATTRIBUTE EXTRACTION ---
-    # Find Year (19xx or 20xx)
     year_match = re.search(r'\b(19|20)\d{2}\b', clean_name)
     target_year = year_match.group(0) if year_match else ""
     
-    # Find Card Number (Last standalone number in the string)
     num_match = re.search(r'\b\d{1,4}[A-Z]?\b$', clean_name.strip())
     target_num = num_match.group(0) if num_match else ""
     
-    # Isolate Player (Remove year, number, and common brands to get the "Core Name")
     core_name = clean_name.replace(target_year, "").replace(target_num, "")
     for brand in ["PANINI", "TOPPS", "BOWMAN", "UPPER DECK", "PRIZM", "ABSOLUTE"]:
         core_name = re.sub(brand, '', core_name, flags=re.IGNORECASE)
@@ -80,11 +77,11 @@ def fetch_market_valuation(clean_name, grade_filter=""):
                                    data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, timeout=5)
         token = token_resp.json().get("access_token")
         
-        # --- 2. HIERARCHICAL QUERIES ---
-        # Tier 1: Exact / Tier 2: No '#' symbol / Tier 3: Player + Number + Year
+        # --- 2. HIERARCHICAL QUERIES (Fixed) ---
+        # Removed duplicate year and the word "sold"
         queries = [
-            f"{target_year} {clean_name} {grade_filter} sold -reprint",
-            f"{' '.join(player_parts)} {target_num} {target_year} {grade_filter} sold -reprint"
+            f"{clean_name} {grade_filter} -reprint -rp",
+            f"{' '.join(player_parts)} {target_num} {target_year} {grade_filter} -reprint -rp"
         ]
         
         items = []
@@ -92,9 +89,14 @@ def fetch_market_valuation(clean_name, grade_filter=""):
             if grade_filter == "Ungraded":
                 q = q.replace("Ungraded", "") + " -PSA -BGS -SGC -CGC -graded"
             
+            # Clean up double spaces that might occur from missing variables
+            q = re.sub(r'\s+', ' ', q).strip()
+            
             ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(q)}&category_ids=212&limit=40"
             resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}, timeout=5)
             items = resp.json().get("itemSummaries", [])
+            
+            # If the strict query finds items, stop searching
             if items: break
 
         if not items: return 0.0, []
@@ -103,28 +105,42 @@ def fetch_market_valuation(clean_name, grade_filter=""):
         for item in items:
             title = item.get('title', '').upper()
             
-            # --- 3. THE SMART VERIFICATION GATE ---
-            # Grade check (Mandatory)
+            # --- 3. THE SMART VERIFICATION GATE (Fixed) ---
+            
+            # A. Grade check (Mandatory)
             grade_ok = True
             if "PSA" in grade_filter:
                 all_psa = ["PSA 10", "PSA 9", "PSA 8", "PSA 7", "PSA 6"]
                 if any(g in title for g in all_psa if g != grade_filter.upper()):
                     grade_ok = False
             
-            # Verification (Player + Number + Year)
+            # B. Strict Verification
             has_year = target_year in title if target_year else True
-            has_num = re.search(rf"\b{target_num}\b", title) is not None if target_num else True
+            
+            # Use a more forgiving regex for the number to account for #301, No.301, etc.
+            # It ensures the number isn't buried inside another longer number (like 3010)
+            has_num = True
+            if target_num:
+                has_num = re.search(rf"(?:^|\D){target_num}(?:\D|$)", title) is not None
+                
             has_player = all(p in title for p in player_parts) if player_parts else True
 
+            # The final strict gate
             if grade_ok and has_year and has_num and has_player:
                 if 'price' in item:
-                    points.append({"title": item['title'], "price": float(item['price']['value']), "url": item.get('itemWebUrl', '#')})
+                    points.append({
+                        "title": item['title'], 
+                        "price": float(item['price']['value']), 
+                        "url": item.get('itemWebUrl', '#')
+                    })
             
             if len(points) >= 10: break
                 
         if not points: return 0.0, []
         return (sum(p['price'] for p in points) / len(points)), points
-    except: 
+        
+    except Exception as e:
+        print(f"Error fetching market data: {e}") 
         return 0.0, []
 def auto_label_crops(crops):
     if not hf_client:
