@@ -4,6 +4,7 @@ import numpy as np
 import requests
 import base64
 import pandas as pd
+import re
 from huggingface_hub import InferenceClient
 from supabase import create_client
 
