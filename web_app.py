@@ -29,20 +29,14 @@ st.set_page_config(page_title="TraidLive", layout="wide", initial_sidebar_state=
 st.markdown("""
 <style>
 .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, system-ui, sans-serif; }
-/* Neon Green Robinhood Accents */
 .stButton > button { background-color: #00C805 !important; color: #000000 !important; border-radius: 24px !important; border: none !important; font-weight: 700 !important; transition: 0.2s ease; width: 100%; }
 .stButton > button:hover { background-color: #00E606 !important; transform: translateY(-1px); }
-
-/* Right-Side Navigation (Transparent) */
 .nav-container { position: fixed; right: 40px; top: 40px; z-index: 100; text-align: right; }
 .nav-item { color: rgba(255, 255, 255, 0.4); text-decoration: none; font-size: 16px; font-weight: 600; margin-bottom: 20px; display: block; transition: 0.3s; }
 .nav-item:hover { color: #00C805; }
-
-/* Interactive Table / Results */
 details > summary { list-style: none; outline: none; cursor: pointer; }
 .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #1E2124; }
 .sold-price { color: #00C805; font-weight: 600; font-family: monospace; }
-/* Hide Sidebars */
 [data-testid="stSidebar"] { display: none; }
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
@@ -58,10 +52,11 @@ def fetch_market_valuation(card_name, grade_filter=""):
         token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
         token = token_resp.json().get("access_token")
         
-        # Broad search to ensure we catch results even if metadata is missing in title
-        search_query = f"{card_name} {grade_filter} sold -reprint -rp"
+        # Build search query - now cleaning the input to ensure it's a string
+        clean_name = str(card_name).replace("{", "").replace("}", "").replace("'", "")
+        search_query = f"{clean_name} {grade_filter} sold -reprint -rp"
         if grade_filter == "Ungraded":
-            search_query = f"{card_name} sold -PSA -BGS -SGC -CGC -graded -reprint"
+            search_query = f"{clean_name} sold -PSA -BGS -SGC -CGC -graded -reprint"
         
         ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(search_query)}&category_ids=212&limit=25"
         resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"})
@@ -72,21 +67,13 @@ def fetch_market_valuation(card_name, grade_filter=""):
         points = []
         for item in items:
             title = item.get('title', '').upper()
-            
-            # --- THE GRADE FIREWALL ---
-            # If we are looking for a specific PSA grade, exclude any title that mentions a DIFFERENT PSA grade.
             if "PSA" in grade_filter:
-                all_psa = ["PSA 10", "PSA 9", "PSA 8", "PSA 7", "PSA 6", "PSA 5"]
+                all_psa = ["PSA 10", "PSA 9", "PSA 8", "PSA 7", "PSA 6"]
                 if any(g in title for g in all_psa if g != grade_filter.upper()):
                     continue
             
             if 'price' in item:
-                points.append({
-                    "title": item['title'], 
-                    "price": float(item['price']['value']), 
-                    "url": i.get('itemWebUrl', '#') if 'itemWebUrl' in item else "#"
-                })
-            
+                points.append({"title": item['title'], "price": float(item['price']['value']), "url": item.get('itemWebUrl', '#')})
             if len(points) >= 10: break
                 
         if not points: return 0.0, []
@@ -96,10 +83,14 @@ def fetch_market_valuation(card_name, grade_filter=""):
 def auto_label_crops(crops):
     labels = []
     for crop in crops:
-        _, buf = cv2.imencode(".jpg", crop)
-        b64 = base64.b64encode(buf.tobytes()).decode()
-        resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": "Identify this card: Year, Brand, Player, Card #. No prose."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
-        labels.append(resp.choices[0].message.content.strip())
+        try:
+            _, buf = cv2.imencode(".jpg", crop)
+            b64 = base64.b64encode(buf.tobytes()).decode()
+            # Forcing AI to return a clean string only
+            prompt = "Identify this card. Return ONLY the Year, Brand, Player, and Card # as a single line of text. Example: 2000 Bowman Tom Brady #236"
+            resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
+            labels.append(resp.choices[0].message.content.strip())
+        except: labels.append("ID Error")
     return labels
 
 def detect_cards(image_file):
@@ -123,7 +114,6 @@ def detect_cards(image_file):
 
 def display_pricing_table(name):
     html_rows = ""
-    # Sorted PSA Categories
     for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("PSA 7", "PSA 7"), ("RAW", "Ungraded")]:
         val, points = fetch_market_valuation(name, gr_query)
         if points:
@@ -133,11 +123,9 @@ def display_pricing_table(name):
     if html_rows:
         st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:15px; border:1px solid #30363D; margin-top:10px;'><table style='width:100%; border-collapse:collapse;'>{html_rows}</table></div>", unsafe_allow_html=True)
     else:
-        st.warning("No listings found for this asset.")
+        st.warning(f"No clinical matches found for: {name}")
 
-# --- 4. THE HYBRID INTERFACE ---
-
-# Fixed Nav
+# --- 4. INTERFACE ---
 st.markdown("""<div class="nav-container">
 <a class="nav-item" href="/?page=Home">Home</a>
 <a class="nav-item" href="/?page=Inventory">Inventory</a>
@@ -149,35 +137,28 @@ page = st.query_params.get("page", "Home")
 
 if page == "Home":
     st.title("TraidLive")
-    st.markdown("<h3 style='color: #8E8E93;'>Welcome! Scan up to eight cards or search manually.</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.3 | Clean Identity Logic Active</h3>", unsafe_allow_html=True)
     
-    # 1. MANUAL TEXT SEARCH
-    search_q = st.text_input("Quick Asset Lookup", placeholder="e.g. 2000 Bowman Tom Brady #236")
-    if search_q:
-        if st.button("GET MARKET DATA"):
-            display_pricing_table(search_q)
+    search_q = st.text_input("Quick Lookup", placeholder="e.g. 2000 Bowman Tom Brady #236")
+    if search_q and st.button("GET MARKET DATA"):
+        display_pricing_table(search_q)
 
     st.divider()
 
-    # 2. IMAGE SCANNER
     input_type = st.radio("Input Method", ["Search with Text", "Upload Image"], horizontal=True)
 
     if input_type == "Upload Image":
         upload_option = st.radio("Source:", ["Browse Files", "Use Camera"], horizontal=True)
-        if upload_option == "Use Camera":
-            img_input = st.camera_input("Scanner Active")
-        else:
-            img_input = st.file_uploader("Select an image from your device", type=['jpg','jpeg','png'])
+        img_input = st.camera_input("Scanner") if upload_option == "Use Camera" else st.file_uploader("Select Image", type=['jpg','jpeg','png'])
 
         if img_input:
-            with st.spinner("Isolating individual cards..."):
-                img_input.seek(0)
-                asset_crops = detect_cards(img_input)
-                if asset_crops:
-                    st.write(f"Verified {len(asset_crops)} separate assets.")
-                    if st.button("AI BATCH IDENTIFY"):
-                        st.session_state['scan_results'] = auto_label_crops(asset_crops)
-                        st.session_state['scan_crops'] = asset_crops
+            img_input.seek(0)
+            asset_crops = detect_cards(img_input)
+            if asset_crops:
+                st.write(f"Detected {len(asset_crops)} separate assets.")
+                if st.button("AI BATCH IDENTIFY"):
+                    st.session_state['scan_results'] = auto_label_crops(asset_crops)
+                    st.session_state['scan_crops'] = asset_crops
             
             if 'scan_results' in st.session_state:
                 grid = st.columns(4)
