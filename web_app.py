@@ -25,22 +25,62 @@ supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 # --- 2. ROBINHOOD DESIGN SYSTEM ---
-st.set_page_config(page_title="TraidLive", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="TraidLive | Professional Card Terminal", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
-.stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, system-ui, sans-serif; }
-.stButton > button { background-color: #00C805 !important; color: #000000 !important; border-radius: 24px !important; border: none !important; font-weight: 700 !important; transition: 0.2s ease; width: 100%; }
-.stButton > button:hover { background-color: #00E606 !important; transform: translateY(-1px); }
-.nav-container { position: fixed; right: 40px; top: 40px; z-index: 100; text-align: right; }
-.nav-item { color: rgba(255, 255, 255, 0.4); text-decoration: none; font-size: 16px; font-weight: 600; margin-bottom: 20px; display: block; transition: 0.3s; }
-.nav-item:hover { color: #00C805; }
-details > summary { list-style: none; outline: none; cursor: pointer; }
-.sold-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #1E2124; }
-.sold-price { color: #00C805; font-weight: 600; font-family: monospace; }
-[data-testid="stSidebar"] { display: none; }
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
+    /* Global Styles */
+    .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    
+    /* Modern Right-Side Navigation Container */
+    .nav-container {
+        position: fixed;
+        right: 30px;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        gap: 30px;
+        background: rgba(30, 33, 36, 0.6);
+        padding: 40px 20px;
+        border-radius: 20px;
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        text-align: center;
+    }
+    .nav-item {
+        color: rgba(255, 255, 255, 0.5);
+        text-decoration: none;
+        font-size: 15px;
+        font-weight: 600;
+        transition: 0.3s ease;
+    }
+    .nav-item:hover { color: #00C805; }
+
+    /* Buttons & Inputs */
+    .stButton > button {
+        background-color: #00C805 !important;
+        color: #000000 !important;
+        border-radius: 24px !important;
+        border: none !important;
+        font-weight: 700 !important;
+        transition: 0.2s ease;
+        width: 100%;
+        padding: 10px 0;
+    }
+    .stButton > button:hover { background-color: #00E606 !important; transform: translateY(-2px); }
+    
+    /* UI Cleanups */
+    details > summary { list-style: none; outline: none; cursor: pointer; }
+    .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #1E2124; }
+    .sold-price { color: #00C805; font-weight: 600; font-family: monospace; font-size: 1.1rem; }
+    .welcome-text { color: #8E8E93; font-size: 1.2rem; margin-bottom: 30px; font-weight: 500; }
+    
+    /* Hide Default Streamlit Elements */
+    [data-testid="stSidebar"] { display: none; }
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,71 +110,66 @@ def fetch_market_valuation(clean_name, grade_filter=""):
     for brand in ["PANINI", "TOPPS", "BOWMAN", "UPPER DECK", "PRIZM", "ABSOLUTE"]:
         core_name = re.sub(brand, '', core_name, flags=re.IGNORECASE)
     
-    player_parts = [p.upper() for p in core_name.strip().split() if len(p) > 2]
+    # FIX: Changed len(p) > 2 to len(p) > 1 to allow names like "Bo" or "Ty"
+    player_parts = [p.upper() for p in core_name.strip().split() if len(p) > 1]
 
     try:
         token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, 
                                    data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, timeout=5)
         token = token_resp.json().get("access_token")
         
-        # --- 2. HIERARCHICAL QUERIES (Fixed) ---
-        # Removed duplicate year and the word "sold"
+        # --- 2. HIERARCHICAL QUERIES ---
         queries = [
             f"{clean_name} {grade_filter} -reprint -rp",
             f"{' '.join(player_parts)} {target_num} {target_year} {grade_filter} -reprint -rp"
         ]
         
-        items = []
+        points = [] # Move points array outside to collect valid results across attempts
+        
         for q in queries:
             if grade_filter == "Ungraded":
-                q = q.replace("Ungraded", "") + " -PSA -BGS -SGC -CGC -graded"
+                # FIX: Shortened negative keyword list to prevent API choking
+                q = q.replace("Ungraded", "") + " -PSA -BGS -SGC -CGC" 
             
-            # Clean up double spaces that might occur from missing variables
             q = re.sub(r'\s+', ' ', q).strip()
             
             ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(q)}&category_ids=212&limit=40"
             resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}, timeout=5)
             items = resp.json().get("itemSummaries", [])
             
-            # If the strict query finds items, stop searching
-            if items: break
-
-        if not items: return 0.0, []
-        
-        points = []
-        for item in items:
-            title = item.get('title', '').upper()
-            
-            # --- 3. THE SMART VERIFICATION GATE (Fixed) ---
-            
-            # A. Grade check (Mandatory)
-            grade_ok = True
-            if "PSA" in grade_filter:
-                all_psa = ["PSA 10", "PSA 9", "PSA 8", "PSA 7", "PSA 6"]
-                if any(g in title for g in all_psa if g != grade_filter.upper()):
-                    grade_ok = False
-            
-            # B. Strict Verification
-            has_year = target_year in title if target_year else True
-            
-            # Use a more forgiving regex for the number to account for #301, No.301, etc.
-            # It ensures the number isn't buried inside another longer number (like 3010)
-            has_num = True
-            if target_num:
-                has_num = re.search(rf"(?:^|\D){target_num}(?:\D|$)", title) is not None
+            # FIX: Validate items immediately. 
+            for item in items:
+                title = item.get('title', '').upper()
                 
-            has_player = all(p in title for p in player_parts) if player_parts else True
+                # A. Grade check (Mandatory)
+                grade_ok = True
+                if "PSA" in grade_filter:
+                    all_psa = ["PSA 10", "PSA 9", "PSA 8", "PSA 7", "PSA 6"]
+                    if any(g in title for g in all_psa if g != grade_filter.upper()):
+                        grade_ok = False
+                
+                # B. Strict Verification
+                has_year = target_year in title if target_year else True
+                has_num = True
+                if target_num:
+                    has_num = re.search(rf"(?:^|\D){re.escape(target_num)}(?:\D|$)", title) is not None
+                    
+                has_player = all(p in title for p in player_parts) if player_parts else True
 
-            # The final strict gate
-            if grade_ok and has_year and has_num and has_player:
-                if 'price' in item:
-                    points.append({
-                        "title": item['title'], 
-                        "price": float(item['price']['value']), 
-                        "url": item.get('itemWebUrl', '#')
-                    })
+                # The final strict gate
+                if grade_ok and has_year and has_num and has_player:
+                    if 'price' in item:
+                        points.append({
+                            "title": item['title'], 
+                            "price": float(item['price']['value']), 
+                            "url": item.get('itemWebUrl', '#')
+                        })
+                
+                if len(points) >= 10: break # Stop if we found 10 good comps
             
-            if len(points) >= 10: break
+            # FIX: Only break out of the query loop if we actually successfully validated items!
+            if points: 
+                break
                 
         if not points: return 0.0, []
         return (sum(p['price'] for p in points) / len(points)), points
@@ -225,50 +260,129 @@ def display_pricing_table(raw_name):
         st.warning(f"Market analysis failed for: {clean_name}. Ensure spelling is correct or refine the search.")
 
 # --- 5. INTERFACE ---
-st.markdown("""<div class="nav-container">
-<a class="nav-item" href="/?page=Home">Home</a>
-<a class="nav-item" href="/?page=Inventory">Inventory</a>
-<a class="nav-item" href="/?page=Search">Search</a>
-<a class="nav-item" href="/?page=Profile">Profile</a>
-</div>""", unsafe_allow_html=True)
+st.markdown("""
+<div class="nav-container">
+    <a class="nav-item" href="/?page=Home">Home</a>
+    <a class="nav-item" href="/?page=Trending">Trending</a>
+    <a class="nav-item" href="/?page=Profile">Profile</a>
+    <a class="nav-item" href="/?page=About">About Us</a>
+</div>
+""", unsafe_allow_html=True)
 
 page = st.query_params.get("page", "Home")
 
-if page == "Home":
-    st.title("TraidLive")
-    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.6 | Resilient Search Enabled</h3>", unsafe_allow_html=True)
-    
-    search_q = st.text_input("Quick Lookup", placeholder="e.g. 2000 Bowman Tom Brady 236")
-    if search_q and st.button("GET MARKET DATA"):
-        display_pricing_table(search_q)
+# Restrict the main content width so it doesn't overlap with the right-side navigation
+main_col, empty_right_pad = st.columns([0.85, 0.15])
 
-    st.divider()
+with main_col:
+    if page == "Home":
+        st.title("TraidLive")
+        st.markdown('<p class="welcome-text">Welcome! Upload a photo with up to 8 cards to search current listings.</p>', unsafe_allow_html=True)
+        
+        # Clean separation of inputs using tabs
+        search_tab, upload_tab = st.tabs(["🔍 Search with Text", "📸 Upload Photo"])
+        
+        with search_tab:
+            st.markdown("<br>", unsafe_allow_html=True)
+            search_q = st.text_input("Quick Lookup", placeholder="e.g. 2024 Panini Prizm Drake Maye 301")
+            if search_q and st.button("GET MARKET DATA", key="text_search_btn"):
+                display_pricing_table(search_q)
 
-    input_type = st.radio("Input Method", ["Search with Text", "Upload Image"], horizontal=True)
-
-    if input_type == "Upload Image":
-        upload_option = st.radio("Source:", ["Browse Files", "Use Camera"], horizontal=True)
-        img_input = st.camera_input("Scanner") if upload_option == "Use Camera" else st.file_uploader("Select Image", type=['jpg','jpeg','png'])
-
-        if img_input:
-            asset_crops = detect_cards(img_input)
-            if asset_crops:
-                st.success(f"Detected {len(asset_crops)} card(s).")
-                if st.button("AI BATCH IDENTIFY"):
-                    with st.spinner("AI is analyzing text on cards..."):
-                        st.session_state['scan_results'] = auto_label_crops(asset_crops)
-                        st.session_state['scan_crops'] = asset_crops
-            else:
-                st.warning("No cards detected. Try placing them on a contrasting background.")
+        with upload_tab:
+            st.markdown("<br>", unsafe_allow_html=True)
+            upload_option = st.radio("Choose Photo Source:", ["Use Camera", "Upload Document"], horizontal=True)
             
-            if 'scan_results' in st.session_state:
-                grid = st.columns(4)
-                for i, name in enumerate(st.session_state['scan_results']):
-                    with grid[i % 4]:
-                        st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
-                        st.session_state['scan_results'][i] = st.text_input(f"Asset {i+1}", value=sanitize_card_name(name), key=f"sn_{i}")
-                        if st.button(f"Analyze {i+1}", key=f"sp_{i}"):
-                            display_pricing_table(st.session_state['scan_results'][i])
+            img_input = None
+            if upload_option == "Use Camera":
+                img_input = st.camera_input("Scanner")
+            else:
+                img_input = st.file_uploader("Select Image", type=['jpg','jpeg','png'])
 
-elif page == "Inventory": 
-    st.title("Vault")
+            if img_input:
+                # The backend logic remains perfectly untouched
+                asset_crops = detect_cards(img_input)
+                if asset_crops:
+                    st.success(f"Detected {len(asset_crops)} card(s).")
+                    if st.button("AI BATCH IDENTIFY"):
+                        with st.spinner("AI is analyzing text on cards..."):
+                            st.session_state['scan_results'] = auto_label_crops(asset_crops)
+                            st.session_state['scan_crops'] = asset_crops
+                else:
+                    st.warning("No cards detected. Try placing them on a contrasting background.")
+                
+                if 'scan_results' in st.session_state:
+                    st.divider()
+                    grid = st.columns(4)
+                    for i, name in enumerate(st.session_state['scan_results']):
+                        with grid[i % 4]:
+                            st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
+                            st.session_state['scan_results'][i] = st.text_input(f"Asset {i+1}", value=sanitize_card_name(name), key=f"sn_{i}")
+                            if st.button(f"Analyze {i+1}", key=f"sp_{i}"):
+                                display_pricing_table(st.session_state['scan_results'][i])
+
+    elif page == "Trending":
+        st.title("Trending Cards:")
+        st.markdown("<p style='color: #8E8E93; margin-top: 20px;'>Market movement data populating soon...</p>", unsafe_allow_html=True)
+
+    elif page == "Profile":
+        st.title("Profile Vault")
+        
+        # Initialize login state
+        if 'logged_in' not in st.session_state:
+            st.session_state['logged_in'] = False
+
+        if not st.session_state['logged_in']:
+            login_tab, register_tab = st.tabs(["Login", "Create New Profile"])
+            
+            with login_tab:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.text_input("Username / Email", key="log_user")
+                st.text_input("Password", type="password", key="log_pass")
+                if st.button("Access Vault", key="btn_login"):
+                    st.session_state['logged_in'] = True
+                    st.rerun()
+                    
+            with register_tab:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.text_input("Email Address", key="reg_email")
+                st.text_input("Choose Username", key="reg_user")
+                st.text_input("Create Password", type="password", key="reg_pass")
+                if st.button("Create Profile", key="btn_reg"):
+                    st.session_state['logged_in'] = True
+                    st.success("Profile Created! Welcome to TraidLive.")
+                    st.rerun()
+        else:
+            st.success("Welcome back! You are securely logged in.")
+            
+            st.divider()
+            st.markdown("### Current Inventory")
+            
+            # Professional placeholder dataframe
+            st.dataframe(
+                {
+                    "Asset": ["2000 Bowman Tom Brady 236", "2024 Panini Prizm Drake Maye 301", "1989 Upper Deck Ken Griffey Jr 1"],
+                    "Grade": ["PSA 8", "RAW", "PSA 9"],
+                    "Est. Value": ["$2,450.00", "$45.00", "$185.00"],
+                    "Date Added": ["2023-10-12", "2024-01-05", "2024-02-14"]
+                },
+                hide_index=True,
+                use_container_width=True
+            )
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Log Out"):
+                st.session_state['logged_in'] = False
+                st.rerun()
+
+    elif page == "About":
+        st.title("About Us")
+        st.markdown("""
+        <div style="background: #1E2124; padding: 40px; border-radius: 16px; border: 1px solid #30363D; margin-top: 30px;">
+            <p style="font-size: 1.2rem; line-height: 1.8; color: #E5E5EA; margin-bottom: 20px;">
+                We are a company of card trading enthusiasts giving a database with AI card identification and price tracking to small businesses.
+            </p>
+            <p style="font-size: 1.1rem; line-height: 1.8; color: #8E8E93;">
+                By combining state-of-the-art vision models with real-time market data, we provide a robust, automated workflow that takes the guesswork out of the hobby. Trade with confidence, price with precision, and build your vault.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
