@@ -40,8 +40,12 @@ def fetch_market_valuation(card_name, grade_filter=""):
         )
         token = token_resp.json().get("access_token")
         
-        # Searching specifically for SOLD listings with the grade filter
-        search_query = f"{card_name} {grade_filter} sold"
+        # Smart Query Builder: Exclude graded terms when searching for Raw cards
+        if grade_filter == "Ungraded":
+            search_query = f"{card_name} -PSA -BGS -SGC -CGC -graded sold"
+        else:
+            search_query = f"{card_name} {grade_filter} sold"
+            
         query_encoded = requests.utils.quote(search_query)
         
         # Pull up to 10 sold listings
