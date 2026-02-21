@@ -14,6 +14,7 @@ SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 EBAY_APP_ID = st.secrets.get("EBAY_APP_ID", "")
 EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "")
+PSA_TOKEN = st.secrets.get("PSA_TOKEN", "")
 
 @st.cache_resource
 def init_connections():
@@ -184,11 +185,9 @@ def auto_label_crops(crops):
         
     labels = []
     # UPDATED PROMPT: Force OCR and explicitly ban guessing.
-    prompt = """
-    Return ONLY a single line formatted strictly as: [Year] [Brand] [Player] [Card Number]
-    Example: 2024 Panini Prizm Drake Maye 301
-    Ensure the Card Number is at the very end.
-    """
+    prompt = """OCR ONLY: Read the text on this card. Return ONLY: [Year] [Brand] [Player] [Card #]. DO NOT GUESS based on team or uniform. 
+    If the card is in a PSA graded slab, also find the certification number (7 to 9 digits) on the label and append it exactly like this: | PSA: 123456789.
+    Example: 2024 Panini Prizm Drake Maye 301 | PSA: 84729103"""
     
     for crop in crops:
         try:
@@ -221,6 +220,23 @@ def generate_card_history(card_name):
         return resp.choices[0].message.content.strip()
     except Exception as e: 
         return f"Could not generate history: {e}"
+@st.cache_data(ttl=86400, show_spinner=False)
+def verify_psa_cert(cert_number):
+    if not PSA_TOKEN:
+        return False, "PSA API Token missing from secrets"
+        
+    url = f"https://api.psacard.com/publicapi/cert/GetByCertNumber/{cert_number}"
+    headers = {"authorization": f"bearer {PSA_TOKEN}"}
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("IsValidRequest"):
+                return True, "Valid"
+        return False, "Not Found"
+    except Exception as e:
+        return False, str(e)
 def detect_cards(image_file):
     image_file.seek(0) # Ensure file pointer is at the start
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
@@ -334,8 +350,29 @@ with main_col:
                         with grid[i % 4]:
                             st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
                             
-                            current_name = st.text_input(f"Asset {i+1}", value=sanitize_card_name(name), key=f"sn_{i}")
+                            # --- PARSE THE AI RESULT ---
+                            display_name = name
+                            psa_cert = None
+                            if "| PSA:" in name:
+                                parts = name.split("| PSA:")
+                                display_name = parts[0].strip()
+                                # Extract just the numbers
+                                psa_cert = re.sub(r'\D', '', parts[1])
                             
+                            current_name = st.text_input(f"Asset {i+1}", value=sanitize_card_name(display_name), key=f"sn_{i}")
+                            
+                            # --- PSA VERIFICATION UI ---
+                            if psa_cert and len(psa_cert) >= 7:
+                                is_valid, status = verify_psa_cert(psa_cert)
+    
+                                if is_valid:
+                                    st.markdown(f"✅ **Verified:** [PSA {psa_cert}](https://www.psacard.com/cert/{psa_cert})", unsafe_allow_html=True)
+                                elif status == "API_OFFLINE":
+                                    # Just show the link without the "Verified" checkmark so it's still useful
+                                    st.markdown(f"🔗 [View on PSA Website](https://www.psacard.com/cert/{psa_cert})", unsafe_allow_html=True)
+                                elif status == "Not Found":
+                                    st.markdown(f"⚠️ **PSA Alert:** {psa_cert} (Not Found)", unsafe_allow_html=True)
+
                             # Fallback manual trigger if they edit the text
                             if st.button(f"Update Price Check", key=f"sp_{i}"):
                                 st.session_state['auto_price_check'] = True
@@ -344,7 +381,7 @@ with main_col:
                             if st.session_state.get('auto_price_check'):
                                 display_pricing_table(current_name)
                                 
-                                # NEW: AI History Lore Button
+                                # AI History Lore Button
                                 if st.button("🤖 About this card", key=f"about_{i}"):
                                     with st.spinner("Consulting AI Lore..."):
                                         st.session_state[f"history_{i}"] = generate_card_history(current_name)
