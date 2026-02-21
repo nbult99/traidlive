@@ -65,26 +65,18 @@ def fetch_market_valuation(card_name, grade_filter=""):
                 # --- STRICT TITLE VALIDATION ---
                 is_valid = True
                 
-                # If we want an ungraded card, ensure it doesn't say PSA in the title
                 if grade_filter == "Ungraded":
                     if "PSA" in title.upper() or "BGS" in title.upper() or "SGC" in title.upper():
                         is_valid = False
                 
-                # If we want a specific grade (like PSA 9), ensure the number '9' is actually in the title
                 elif "PSA" in grade_filter:
-                    # Extract the number from the filter (e.g., 'PSA 9' -> '9')
                     grade_num = grade_filter.replace("PSA", "").replace("(", "").replace(")", "").strip()
-                    
-                    # For "PSA 0-6", we check if ANY of those numbers are in the title
                     if grade_filter == "PSA (1, 2, 3, 4, 5, 6)":
                          if not any(str(i) in title for i in range(1, 7)):
                              is_valid = False
-                    
-                    # For standard single grades, check if the specific number is in the title
                     elif grade_num not in title:
                         is_valid = False
 
-                # If it passes validation, add it to our points
                 if is_valid:
                     points.append({
                         "title": title,
@@ -92,7 +84,6 @@ def fetch_market_valuation(card_name, grade_filter=""):
                         "url": item.get('itemWebUrl', '#')
                     })
                 
-                # Stop once we have 10 perfect matches
                 if len(points) >= 10:
                     break
         
@@ -221,62 +212,20 @@ if uploaded_file:
                                     aq = f"{name} {grade_query}"
                                 active_link = f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(aq)}"
                                 
+                                # Flattened HTML to prevent Markdown rendering it as a code block
                                 if not points:
-                                    html_rows += f"""
-                                    <tr style='border-bottom: 1px solid #2C2C2E;'>
-                                        <td style='padding: 12px 8px;'><strong>{label}</strong></td>
-                                        <td style='padding: 12px 8px; text-align: right; color:#FF453A; font-size: 13px;'>No listings found</td>
-                                    </tr>
-                                    """
+                                    html_rows += f"<tr style='border-bottom: 1px solid #2C2C2E;'><td style='padding: 12px 8px;'><strong>{label}</strong></td><td style='padding: 12px 8px; text-align: right; color:#FF453A; font-size: 13px;'>No listings found</td></tr>"
                                 else:
                                     listings_html = ""
                                     for p in points:
-                                        listings_html += f"""
-                                        <div class='sold-row'>
-                                            <span class='sold-title'>{p['title']}</span>
-                                            <span class='sold-price'>${p['price']:,.2f}</span>
-                                            <a class='sold-link' href='{p['url']}' target='_blank'>Sold Link</a>
-                                        </div>
-                                        """
+                                        listings_html += f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a class='sold-link' href='{p['url']}' target='_blank'>Sold Link</a></div>"
                                     
-                                    listings_html += f"""
-                                        <div style='margin-top: 15px; text-align: center;'>
-                                            <a href='{active_link}' target='_blank' style='color: #000000; background-color: #FFFFFF; font-size: 12px; text-decoration: none; font-weight: 700; padding: 10px 16px; border-radius: 8px; display: block; width: 100%; text-align: center; transition: 0.2s;'>🔍 View Active Listings on eBay</a>
-                                        </div>
-                                    """
+                                    listings_html += f"<div style='margin-top: 15px; text-align: center;'><a href='{active_link}' target='_blank' style='color: #000000; background-color: #FFFFFF; font-size: 12px; text-decoration: none; font-weight: 700; padding: 10px 16px; border-radius: 8px; display: block; width: 100%; text-align: center; transition: 0.2s;'>🔍 View Active Listings on eBay</a></div>"
                                     
-                                    html_rows += f"""
-                                    <tr style='border-bottom: 1px solid #2C2C2E;'>
-                                        <td style='padding: 12px 8px; vertical-align: top;'><strong>{label}</strong></td>
-                                        <td style='padding: 12px 8px; text-align: right; vertical-align: top;'>
-                                            <details style='cursor: pointer;'>
-                                                <summary style='color: #34C759; font-weight: 700; outline: none;'>
-                                                    ${val:,.2f} <span style='font-size:10px; color:#8E8E93; margin-left: 5px;'>▼</span>
-                                                </summary>
-                                                <div style='margin-top: 12px; background: #151516; padding: 12px; border-radius: 8px; border: 1px solid #3A3A3C; text-align: left;'>
-                                                    <div class='audit-header'>SOLD DATA ({len(points)} ITEMS)</div>
-                                                    {listings_html}
-                                                </div>
-                                            </details>
-                                        </td>
-                                    </tr>
-                                    """
+                                    html_rows += f"<tr style='border-bottom: 1px solid #2C2C2E;'><td style='padding: 12px 8px; vertical-align: top;'><strong>{label}</strong></td><td style='padding: 12px 8px; text-align: right; vertical-align: top;'><details style='cursor: pointer;'><summary style='color: #34C759; font-weight: 700; outline: none;'>${val:,.2f} <span style='font-size:10px; color:#8E8E93; margin-left: 5px;'>▼</span></summary><div style='margin-top: 12px; background: #151516; padding: 12px; border-radius: 8px; border: 1px solid #3A3A3C; text-align: left;'><div class='audit-header'>SOLD DATA ({len(points)} ITEMS)</div>{listings_html}</div></details></td></tr>"
                                     
-                            full_table = f"""
-                            <div style='background-color: #1C1C1E; border-radius: 12px; padding: 10px; border: 1px solid #3A3A3C; margin-top: 15px;'>
-                                <table style='width: 100%; border-collapse: collapse; font-size: 14px;'>
-                                    <thead>
-                                        <tr style='border-bottom: 1px solid #3A3A3C; color: #8E8E93;'>
-                                            <th style='text-align: left; padding: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;'>Grade</th>
-                                            <th style='text-align: right; padding: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;'>Avg Price (Click to view)</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {html_rows}
-                                    </tbody>
-                                </table>
-                            </div>
-                            """
+                            full_table = f"<div style='background-color: #1C1C1E; border-radius: 12px; padding: 10px; border: 1px solid #3A3A3C; margin-top: 15px;'><table style='width: 100%; border-collapse: collapse; font-size: 14px;'><thead><tr style='border-bottom: 1px solid #3A3A3C; color: #8E8E93;'><th style='text-align: left; padding: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;'>Grade</th><th style='text-align: right; padding: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;'>Avg Price (Click to view)</th></tr></thead><tbody>{html_rows}</tbody></table></div>"
+                            
                             st.markdown(full_table, unsafe_allow_html=True)
     else:
         st.warning("No card contours detected.")
