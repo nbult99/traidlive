@@ -124,6 +124,15 @@ st.markdown("""
         color: white;
         transform: scale(1.02);
     }
+    /* Price preview text styling */
+    .price-preview {
+        background-color: #1C1C1E;
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid #3A3A3C;
+        margin-top: 10px;
+        font-size: 14px;
+    }
     /* Dataframe styling */
     .stDataFrame {
         background-color: #1C1C1E;
@@ -182,6 +191,20 @@ if uploaded_file:
                 with cols[i % 4]:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     st.session_state['suggestions'][i] = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
+                    
+                    # NEW: Individual Price Check Button
+                    if st.button(f"Check Price {i+1}", key=f"chk_{i}"):
+                        name = st.session_state['suggestions'][i]
+                        with st.spinner("Fetching..."):
+                            psa_val = fetch_market_valuation(name, "PSA 10")
+                            raw_val = fetch_market_valuation(name, "Ungraded")
+                            
+                            st.markdown(f"""
+                            <div class="price-preview">
+                                <span style='color:#34C759; font-weight:bold;'>PSA 10:</span> ${psa_val:,.2f}<br>
+                                <span style='color:#0A84FF; font-weight:bold;'>Raw:</span> ${raw_val:,.2f}
+                            </div>
+                            """, unsafe_allow_html=True)
     else:
         st.warning("No card contours detected.")
 
