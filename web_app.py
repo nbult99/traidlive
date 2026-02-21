@@ -44,16 +44,26 @@ footer {visibility: hidden;}
 """, unsafe_allow_html=True)
 
 # --- 3. CORE ENGINES ---
-def fetch_market_valuation(card_name, grade_filter=""):
+def fetch_market_valuation(raw_input, grade_filter=""):
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
+    
+    # --- SANITY PURGE ---
+    # This force-cleans the input if it's a dictionary or contains dict characters
+    clean_name = str(raw_input)
+    if isinstance(raw_input, dict):
+        clean_name = raw_input.get('full', str(raw_input))
+    
+    # Remove all possible dictionary artifacts
+    for char in ["{", "}", "'", ":", "full", "year", "brand", "player", "num"]:
+        clean_name = clean_name.replace(char, "")
+    clean_name = clean_name.strip()
+
     try:
         token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
         token = token_resp.json().get("access_token")
         
-        # Build search query - now cleaning the input to ensure it's a string
-        clean_name = str(card_name).replace("{", "").replace("}", "").replace("'", "")
         search_query = f"{clean_name} {grade_filter} sold -reprint -rp"
         if grade_filter == "Ungraded":
             search_query = f"{clean_name} sold -PSA -BGS -SGC -CGC -graded -reprint"
@@ -86,8 +96,8 @@ def auto_label_crops(crops):
         try:
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
-            # Forcing AI to return a clean string only
-            prompt = "Identify this card. Return ONLY the Year, Brand, Player, and Card # as a single line of text. Example: 2000 Bowman Tom Brady #236"
+            # Absolute instruction to return a string, not code
+            prompt = "Return ONLY the Year, Brand, Player, and Card # as a single line. Example: 2000 Bowman Tom Brady 236. NO DICTIONARIES, NO BRACES."
             resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
             labels.append(resp.choices[0].message.content.strip())
         except: labels.append("ID Error")
@@ -123,7 +133,7 @@ def display_pricing_table(name):
     if html_rows:
         st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:15px; border:1px solid #30363D; margin-top:10px;'><table style='width:100%; border-collapse:collapse;'>{html_rows}</table></div>", unsafe_allow_html=True)
     else:
-        st.warning(f"No clinical matches found for: {name}")
+        st.warning(f"No listings found.")
 
 # --- 4. INTERFACE ---
 st.markdown("""<div class="nav-container">
@@ -137,14 +147,16 @@ page = st.query_params.get("page", "Home")
 
 if page == "Home":
     st.title("TraidLive")
-    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.3 | Clean Identity Logic Active</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.4 | Dictionary Purge Active</h3>", unsafe_allow_html=True)
     
-    search_q = st.text_input("Quick Lookup", placeholder="e.g. 2000 Bowman Tom Brady #236")
+    # 1. TEXT SEARCH
+    search_q = st.text_input("Quick Lookup", placeholder="e.g. 2000 Bowman Tom Brady 236")
     if search_q and st.button("GET MARKET DATA"):
         display_pricing_table(search_q)
 
     st.divider()
 
+    # 2. SCANNER
     input_type = st.radio("Input Method", ["Search with Text", "Upload Image"], horizontal=True)
 
     if input_type == "Upload Image":
@@ -155,7 +167,6 @@ if page == "Home":
             img_input.seek(0)
             asset_crops = detect_cards(img_input)
             if asset_crops:
-                st.write(f"Detected {len(asset_crops)} separate assets.")
                 if st.button("AI BATCH IDENTIFY"):
                     st.session_state['scan_results'] = auto_label_crops(asset_crops)
                     st.session_state['scan_crops'] = asset_crops
@@ -165,7 +176,9 @@ if page == "Home":
                 for i, name in enumerate(st.session_state['scan_results']):
                     with grid[i % 4]:
                         st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
-                        st.session_state['scan_results'][i] = st.text_input(f"Asset {i+1}", value=name, key=f"sn_{i}")
+                        # The user can now manually delete the dict if it appears, 
+                        # but our backend will clean it anyway.
+                        st.session_state['scan_results'][i] = st.text_input(f"Asset {i+1}", value=str(name), key=f"sn_{i}")
                         if st.button(f"Analyze {i+1}", key=f"sp_{i}"):
                             display_pricing_table(st.session_state['scan_results'][i])
 
