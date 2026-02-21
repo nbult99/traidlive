@@ -59,31 +59,43 @@ def fetch_market_valuation(clean_name, grade_filter=""):
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
-    # Extract strict match criteria from the name (Year, Number, Player)
+    # --- 1. SMART ATTRIBUTE EXTRACTION ---
+    # Find Year (19xx or 20xx)
     year_match = re.search(r'\b(19|20)\d{2}\b', clean_name)
     target_year = year_match.group(0) if year_match else ""
     
-    # Find the card number (assuming it's the last digits or specifically marked)
+    # Find Card Number (Last standalone number in the string)
     num_match = re.search(r'\b\d{1,4}[A-Z]?\b$', clean_name.strip())
     target_num = num_match.group(0) if num_match else ""
     
-    # Isolate player name (everything between year and number)
-    player_parts = clean_name.replace(target_year, "").replace(target_num, "").strip().split()
-    target_player_parts = [p.upper() for p in player_parts if len(p) > 2]
+    # Isolate Player (Remove year, number, and common brands to get the "Core Name")
+    core_name = clean_name.replace(target_year, "").replace(target_num, "")
+    for brand in ["PANINI", "TOPPS", "BOWMAN", "UPPER DECK", "PRIZM", "ABSOLUTE"]:
+        core_name = re.sub(brand, '', core_name, flags=re.IGNORECASE)
+    
+    player_parts = [p.upper() for p in core_name.strip().split() if len(p) > 2]
 
     try:
-        token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, timeout=5)
+        token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, 
+                                   data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, timeout=5)
         token = token_resp.json().get("access_token")
         
-        # Broad search to find candidates
-        q = f"{clean_name} {grade_filter} sold -reprint -rp"
-        if grade_filter == "Ungraded":
-            q = f"{clean_name} sold -PSA -BGS -SGC -CGC -graded -reprint"
+        # --- 2. HIERARCHICAL QUERIES ---
+        # Tier 1: Exact / Tier 2: No '#' symbol / Tier 3: Player + Number + Year
+        queries = [
+            f"{target_year} {clean_name} {grade_filter} sold -reprint",
+            f"{' '.join(player_parts)} {target_num} {target_year} {grade_filter} sold -reprint"
+        ]
         
-        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(q)}&category_ids=212&limit=40"
-        resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}, timeout=5)
-        data = resp.json()
-        items = data.get("itemSummaries", [])
+        items = []
+        for q in queries:
+            if grade_filter == "Ungraded":
+                q = q.replace("Ungraded", "") + " -PSA -BGS -SGC -CGC -graded"
+            
+            ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(q)}&category_ids=212&limit=40"
+            resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}, timeout=5)
+            items = resp.json().get("itemSummaries", [])
+            if items: break
 
         if not items: return 0.0, []
         
@@ -91,22 +103,20 @@ def fetch_market_valuation(clean_name, grade_filter=""):
         for item in items:
             title = item.get('title', '').upper()
             
-            # --- STRICT 3-POINT FILTER ---
-            # 1. Exact Year Match
-            has_year = target_year in title if target_year else True
-            # 2. Exact Card Number Match (Word boundary check)
-            has_num = re.search(rf"\b{target_num}\b", title) is not None if target_num else True
-            # 3. Exact Player Match (Main name components must exist)
-            has_player = all(p in title for p in target_player_parts)
-
-            # Grade Firewall
+            # --- 3. THE SMART VERIFICATION GATE ---
+            # Grade check (Mandatory)
             grade_ok = True
             if "PSA" in grade_filter:
                 all_psa = ["PSA 10", "PSA 9", "PSA 8", "PSA 7", "PSA 6"]
                 if any(g in title for g in all_psa if g != grade_filter.upper()):
                     grade_ok = False
             
-            if has_year and has_num and has_player and grade_ok:
+            # Verification (Player + Number + Year)
+            has_year = target_year in title if target_year else True
+            has_num = re.search(rf"\b{target_num}\b", title) is not None if target_num else True
+            has_player = all(p in title for p in player_parts) if player_parts else True
+
+            if grade_ok and has_year and has_num and has_player:
                 if 'price' in item:
                     points.append({"title": item['title'], "price": float(item['price']['value']), "url": item.get('itemWebUrl', '#')})
             
@@ -114,7 +124,7 @@ def fetch_market_valuation(clean_name, grade_filter=""):
                 
         if not points: return 0.0, []
         return (sum(p['price'] for p in points) / len(points)), points
-    except Exception as e: 
+    except: 
         return 0.0, []
 def auto_label_crops(crops):
     if not hf_client:
