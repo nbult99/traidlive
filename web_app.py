@@ -155,7 +155,13 @@ st.write("Market Intelligence Dashboard")
 
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 
-uploaded_file = st.file_uploader("Upload Collection Image", type=['jpg', 'jpeg', 'png'])
+# --- CAMERA OR UPLOAD TOGGLE ---
+input_method = st.radio("Choose Input Method:", ["Upload Image", "Take Photo"], horizontal=True)
+
+if input_method == "Upload Image":
+    uploaded_file = st.file_uploader("Upload Collection Image", type=['jpg', 'jpeg', 'png'])
+else:
+    uploaded_file = st.camera_input("Snap a photo of your cards")
 
 if uploaded_file:
     with st.spinner("Analyzing image..."):
