@@ -27,7 +27,7 @@ HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 def fetch_market_valuation(card_name, grade_filter=""):
     """
     Executes targeted marketplace searches.
-    grade_filter: "PSA 10" or "Ungraded"
+    Returns: (average_price, list_of_data_points)
     """
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
@@ -44,18 +44,31 @@ def fetch_market_valuation(card_name, grade_filter=""):
         search_query = f"{card_name} {grade_filter} sold"
         query_encoded = requests.utils.quote(search_query)
         
-        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&category_ids=212&limit=5"
+        # Increased limit to 10
+        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&category_ids=212&limit=10"
         headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}
         
         resp = requests.get(ebay_url, headers=headers)
         data = resp.json()
         items = data.get("itemSummaries", [])
         
-        if not items: return 0.0
-        prices = [float(item['price']['value']) for item in items if 'price' in item]
-        return sum(prices) / len(prices)
+        if not items: return 0.0, []
+        
+        points = []
+        for item in items:
+            if 'price' in item:
+                points.append({
+                    "title": item.get('title', 'Unknown Item'),
+                    "price": float(item['price']['value']),
+                    "url": item.get('itemWebUrl', '#')
+                })
+        
+        if not points: return 0.0, []
+        
+        avg = sum(p['price'] for p in points) / len(points)
+        return avg, points
     except:
-        return 0.0
+        return 0.0, []
 
 def auto_label_crops(crops):
     if not hf_client: return ["" for _ in crops]
@@ -98,57 +111,24 @@ st.set_page_config(page_title="TraidLive | Digital Assets", layout="wide")
 st.markdown("""
     <style>
     /* Dark background */
-    .stApp {
-        background-color: #000000;
-        color: #FFFFFF;
-    }
+    .stApp { background-color: #000000; color: #FFFFFF; }
     /* Rounded Card Style for text inputs */
-    div.stTextInput > div > div > input {
-        background-color: #1C1C1E;
-        color: white;
-        border: 1px solid #3A3A3C;
-        border-radius: 10px;
-    }
+    div.stTextInput > div > div > input { background-color: #1C1C1E; color: white; border: 1px solid #3A3A3C; border-radius: 10px; }
     /* iOS Style Buttons */
-    .stButton > button {
-        background-color: #0A84FF; /* iOS System Blue */
-        color: white;
-        border-radius: 12px;
-        border: none;
-        padding: 10px 24px;
-        font-weight: 600;
-        transition: all 0.2s ease;
-    }
-    .stButton > button:hover {
-        background-color: #409CFF;
-        color: white;
-        transform: scale(1.02);
-    }
-    /* Price preview text styling */
-    .price-preview {
-        background-color: #1C1C1E;
-        padding: 10px;
-        border-radius: 8px;
-        border: 1px solid #3A3A3C;
-        margin-top: 10px;
-        font-size: 14px;
-    }
+    .stButton > button { background-color: #0A84FF; color: white; border-radius: 12px; border: none; padding: 10px 24px; font-weight: 600; transition: all 0.2s ease; }
+    .stButton > button:hover { background-color: #409CFF; color: white; transform: scale(1.02); }
+    /* Audit Box for links */
+    .audit-box { background-color: #1C1C1E; padding: 12px; border-radius: 8px; border: 1px solid #3A3A3C; margin-top: 10px; font-size: 13px; }
+    .audit-header { color: #8E8E93; font-size: 11px; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px; }
+    .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #2C2C2E; }
+    .sold-row:last-child { border-bottom: none; }
+    .sold-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 10px; color: #D1D1D6; }
+    .sold-price { color: #34C759; font-weight: 600; margin-right: 10px; }
+    .sold-link { color: #0A84FF; text-decoration: none; font-size: 12px; font-weight: 500; }
     /* Dataframe styling */
-    .stDataFrame {
-        background-color: #1C1C1E;
-        border-radius: 15px;
-    }
-    /* Header fonts */
-    h1, h2, h3 {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        font-weight: 700;
-        letter-spacing: -0.5px;
-    }
+    .stDataFrame { background-color: #1C1C1E; border-radius: 15px; }
     /* Sidebar styling */
-    section[data-testid="stSidebar"] {
-        background-color: #1C1C1E;
-        border-right: 1px solid #3A3A3C;
-    }
+    section[data-testid="stSidebar"] { background-color: #1C1C1E; border-right: 1px solid #3A3A3C; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -179,8 +159,8 @@ if uploaded_file:
                 if st.button("Commit All to Inventory"):
                     with st.spinner("Synchronizing..."):
                         for i, name in enumerate(st.session_state['suggestions']):
-                            psa_val = fetch_market_valuation(name, "PSA 10")
-                            raw_val = fetch_market_valuation(name, "Ungraded")
+                            psa_val, _ = fetch_market_valuation(name, "PSA 10")
+                            raw_val, _ = fetch_market_valuation(name, "Ungraded")
                             supabase.table("inventory").insert({"card_name": name, "psa_10_price": psa_val, "ungraded_price": raw_val, "owner": owner_id}).execute()
                         st.success("Batch successfully committed.")
 
@@ -192,19 +172,24 @@ if uploaded_file:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     st.session_state['suggestions'][i] = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
-                    # NEW: Individual Price Check Button
                     if st.button(f"Check Price {i+1}", key=f"chk_{i}"):
                         name = st.session_state['suggestions'][i]
-                        with st.spinner("Fetching..."):
-                            psa_val = fetch_market_valuation(name, "PSA 10")
-                            raw_val = fetch_market_valuation(name, "Ungraded")
+                        with st.spinner("Fetching data points..."):
+                            psa_val, psa_points = fetch_market_valuation(name, "PSA 10")
+                            raw_val, raw_points = fetch_market_valuation(name, "Ungraded")
                             
-                            st.markdown(f"""
-                            <div class="price-preview">
-                                <span style='color:#34C759; font-weight:bold;'>PSA 10:</span> ${psa_val:,.2f}<br>
-                                <span style='color:#0A84FF; font-weight:bold;'>Raw:</span> ${raw_val:,.2f}
-                            </div>
-                            """, unsafe_allow_html=True)
+                            def generate_audit_html(label, val, points):
+                                if not points:
+                                    return f"<div class='audit-box'><div class='audit-header'>{label} - ${val:,.2f}</div><div>No data found.</div></div>"
+                                
+                                rows = ""
+                                for p in points:
+                                    rows += f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a class='sold-link' href='{p['url']}' target='_blank'>View</a></div>"
+                                
+                                return f"<div class='audit-box'><div class='audit-header'>{label} - ${val:,.2f} (Based on {len(points)} items)</div>{rows}</div>"
+
+                            st.markdown(generate_audit_html("PSA 10", psa_val, psa_points), unsafe_allow_html=True)
+                            st.markdown(generate_audit_html("RAW", raw_val, raw_points), unsafe_allow_html=True)
     else:
         st.warning("No card contours detected.")
 
