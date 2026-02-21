@@ -26,8 +26,7 @@ HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 # --- 2. MARKET ANALYSIS MODULES ---
 def fetch_market_valuation(card_name, grade_filter=""):
     """
-    Executes targeted marketplace searches.
-    Returns: (average_price, list_of_data_points)
+    Executes targeted marketplace searches with STRICT title validation.
     """
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
@@ -40,7 +39,7 @@ def fetch_market_valuation(card_name, grade_filter=""):
         )
         token = token_resp.json().get("access_token")
         
-        # Smart Query Builder: Exclude graded terms when searching for Raw cards
+        # Build query
         if grade_filter == "Ungraded":
             search_query = f"{card_name} -PSA -BGS -SGC -CGC -graded sold"
         else:
@@ -48,8 +47,8 @@ def fetch_market_valuation(card_name, grade_filter=""):
             
         query_encoded = requests.utils.quote(search_query)
         
-        # Pull up to 10 sold listings
-        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&category_ids=212&limit=10"
+        # Pull up to 20 to ensure we have enough after filtering
+        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&category_ids=212&limit=20"
         headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}
         
         resp = requests.get(ebay_url, headers=headers)
@@ -61,11 +60,41 @@ def fetch_market_valuation(card_name, grade_filter=""):
         points = []
         for item in items:
             if 'price' in item:
-                points.append({
-                    "title": item.get('title', 'Unknown Item'),
-                    "price": float(item['price']['value']),
-                    "url": item.get('itemWebUrl', '#')
-                })
+                title = item.get('title', 'Unknown Item')
+                
+                # --- STRICT TITLE VALIDATION ---
+                is_valid = True
+                
+                # If we want an ungraded card, ensure it doesn't say PSA in the title
+                if grade_filter == "Ungraded":
+                    if "PSA" in title.upper() or "BGS" in title.upper() or "SGC" in title.upper():
+                        is_valid = False
+                
+                # If we want a specific grade (like PSA 9), ensure the number '9' is actually in the title
+                elif "PSA" in grade_filter:
+                    # Extract the number from the filter (e.g., 'PSA 9' -> '9')
+                    grade_num = grade_filter.replace("PSA", "").replace("(", "").replace(")", "").strip()
+                    
+                    # For "PSA 0-6", we check if ANY of those numbers are in the title
+                    if grade_filter == "PSA (1, 2, 3, 4, 5, 6)":
+                         if not any(str(i) in title for i in range(1, 7)):
+                             is_valid = False
+                    
+                    # For standard single grades, check if the specific number is in the title
+                    elif grade_num not in title:
+                        is_valid = False
+
+                # If it passes validation, add it to our points
+                if is_valid:
+                    points.append({
+                        "title": title,
+                        "price": float(item['price']['value']),
+                        "url": item.get('itemWebUrl', '#')
+                    })
+                
+                # Stop once we have 10 perfect matches
+                if len(points) >= 10:
+                    break
         
         if not points: return 0.0, []
         
@@ -113,14 +142,10 @@ st.set_page_config(page_title="TraidLive | Digital Assets", layout="wide")
 
 st.markdown("""
     <style>
-    /* Dark background */
     .stApp { background-color: #000000; color: #FFFFFF; }
-    /* Rounded Card Style for text inputs */
     div.stTextInput > div > div > input { background-color: #1C1C1E; color: white; border: 1px solid #3A3A3C; border-radius: 10px; }
-    /* iOS Style Buttons */
     .stButton > button { background-color: #0A84FF; color: white; border-radius: 12px; border: none; padding: 10px 24px; font-weight: 600; transition: all 0.2s ease; }
     .stButton > button:hover { background-color: #409CFF; color: white; transform: scale(1.02); }
-    /* Dropdown UI cleanups */
     details > summary { list-style: none; }
     details > summary::-webkit-details-marker { display: none; }
     .audit-header { color: #8E8E93; font-size: 11px; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px; font-weight: bold; }
@@ -129,9 +154,7 @@ st.markdown("""
     .sold-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 10px; color: #D1D1D6; font-size: 13px; }
     .sold-price { color: #34C759; font-weight: 600; margin-right: 10px; font-size: 13px; }
     .sold-link { color: #0A84FF; text-decoration: none; font-size: 12px; font-weight: 500; }
-    /* Dataframe styling */
     .stDataFrame { background-color: #1C1C1E; border-radius: 15px; }
-    /* Sidebar styling */
     section[data-testid="stSidebar"] { background-color: #1C1C1E; border-right: 1px solid #3A3A3C; }
     </style>
     """, unsafe_allow_html=True)
@@ -178,7 +201,7 @@ if uploaded_file:
                     
                     if st.button(f"Check Price {i+1}", key=f"chk_{i}"):
                         name = st.session_state['suggestions'][i]
-                        with st.spinner("Calculating market averages..."):
+                        with st.spinner("Fetching full grade breakdown..."):
                             html_rows = ""
                             grades_to_check = [
                                 ("PSA 10", "PSA 10"),
@@ -192,7 +215,6 @@ if uploaded_file:
                             for label, grade_query in grades_to_check:
                                 val, points = fetch_market_valuation(name, grade_query)
                                 
-                                # Construct the eBay link for ACTIVE listings for the final button
                                 if grade_query == "Ungraded":
                                     aq = f"{name} -PSA -BGS -SGC -CGC -graded"
                                 else:
@@ -217,7 +239,6 @@ if uploaded_file:
                                         </div>
                                         """
                                     
-                                    # Active Listings Link at the bottom of the expander
                                     listings_html += f"""
                                         <div style='margin-top: 15px; text-align: center;'>
                                             <a href='{active_link}' target='_blank' style='color: #000000; background-color: #FFFFFF; font-size: 12px; text-decoration: none; font-weight: 700; padding: 10px 16px; border-radius: 8px; display: block; width: 100%; text-align: center; transition: 0.2s;'>🔍 View Active Listings on eBay</a>
