@@ -7,7 +7,7 @@ import pandas as pd
 from huggingface_hub import InferenceClient
 from supabase import create_client
 
-# --- 1. INITIALIZATION (BACKEND UNTOUCHED) ---
+# --- 1. INITIALIZATION ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
@@ -23,56 +23,65 @@ def init_connections():
 supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# --- 2. ROBINHOOD DESIGN SYSTEM (ADAPTIVE) ---
+# --- 2. ROBINHOOD DESIGN SYSTEM (FIXED NAV) ---
 st.set_page_config(page_title="TraidLive", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
-    /* Adaptive Dark/Light Mode & Robinhood Green */
-    :root {
-        --rh-green: #00C805;
-        --rh-black: #000000;
-        --rh-card: #1E2124;
+    /* Robinhood Trading Terminal Aesthetic */
+    .stApp {
+        background-color: #000000;
+        color: #FFFFFF;
+        font-family: -apple-system, system-ui, sans-serif;
     }
-
-    /* Target Robinhood Green for buttons */
+    
+    /* Neon Green Robinhood Accents */
     .stButton > button {
-        background-color: var(--rh-green) !important;
-        color: black !important;
+        background-color: #00C805 !important;
+        color: #000000 !important;
         border-radius: 24px !important;
         border: none !important;
         font-weight: 700 !important;
-        width: 100%;
-        transition: transform 0.2s ease;
+        transition: 0.2s ease;
     }
     .stButton > button:hover {
-        transform: scale(1.02);
         background-color: #00E606 !important;
+        transform: translateY(-1px);
     }
 
-    /* Metric Cards */
-    div[data-testid="stMetric"] {
-        background-color: var(--rh-card);
-        border: 1px solid #30363D;
-        border-radius: 12px;
-        padding: 15px;
+    /* Transparent Right-Side Navigation */
+    .nav-container {
+        position: fixed;
+        right: 40px;
+        top: 40px;
+        z-index: 100;
+        text-align: right;
     }
-    
-    /* Navigation Bar Simulation */
-    .nav-text {
-        font-family: -apple-system, system-ui, sans-serif;
+    .nav-item {
+        color: rgba(255, 255, 255, 0.4);
+        text-decoration: none;
+        font-size: 16px;
         font-weight: 600;
-        letter-spacing: -0.5px;
+        margin-bottom: 20px;
+        display: block;
+        transition: 0.3s;
     }
+    .nav-item:hover {
+        color: #00C805;
+    }
+
+    /* Ticker-style Table Styling */
+    .sold-row { border-bottom: 1px solid #1E2124; padding: 10px 0; }
+    .price-text { color: #00C805; font-weight: 700; font-family: monospace; }
     
-    /* Mobile Responsiveness */
-    @media (max-width: 640px) {
-        .stActionButton { display: none; }
-    }
+    /* Hide default Streamlit sidebar and clutter */
+    [data-testid="stSidebar"] { display: none; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. HELPER FUNCTIONS (RETAINED FROM STABLE BUILD) ---
+# --- 3. THE BACKEND ENGINE ---
 def fetch_market_valuation(card_name, grade_filter=""):
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
@@ -80,7 +89,13 @@ def fetch_market_valuation(card_name, grade_filter=""):
     try:
         token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
         token = token_resp.json().get("access_token")
-        search_query = f"{card_name} {grade_filter} sold"
+        
+        # negative keywords for raw search
+        if grade_filter == "Ungraded":
+            search_query = f"{card_name} -PSA -BGS -SGC -CGC -graded sold"
+        else:
+            search_query = f"{card_name} {grade_filter} sold"
+            
         ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(search_query)}&category_ids=212&limit=10"
         resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"})
         items = resp.json().get("itemSummaries", [])
@@ -94,7 +109,7 @@ def auto_label_crops(crops):
     for crop in crops:
         _, buf = cv2.imencode(".jpg", crop)
         b64 = base64.b64encode(buf.tobytes()).decode()
-        resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": "Identify this card: Year, Brand, Player, Card #. No prose."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
+        resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": "Identify this card. Year, Brand, Player, Card #. No prose."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
         labels.append(resp.choices[0].message.content.strip())
     return labels
 
@@ -113,56 +128,62 @@ def detect_cards(image_file):
             crops.append(img[y:y+h, x:x+w])
     return crops
 
-# --- 4. MULTI-PAGE NAVIGATION ---
-page = st.sidebar.selectbox("Navigate", ["Home", "Search & Identify", "Inventory", "Profile"])
+# --- 4. TERMINAL UI STRUCTURE ---
 
-# --- PAGE: HOME ---
-if page == "Home":
-    st.title("Welcome to TraidLive")
-    st.subheader("Your AI-Powered Trading Floor")
-    st.write("Track market movement, verify assets, and manage your vault with high-frequency precision.")
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Market Status", "OPEN", delta="Active")
-    col2.metric("Top Mover", "Tom Brady RC", delta="12.4%", delta_color="normal")
-    col3.metric("Vault Value", "$24,502.10", delta="+$420.00")
+# Right-Side Navigation
+st.markdown("""
+    <div class="nav-container">
+        <a class="nav-item" href="/?page=Home">Home</a>
+        <a class="nav-item" href="/?page=Inventory">Inventory</a>
+        <a class="nav-item" href="/?page=Search">Search</a>
+        <a class="nav-item" href="/?page=Profile">Profile</a>
+    </div>
+    """, unsafe_allow_html=True)
 
-# --- PAGE: SEARCH & IDENTIFY ---
-elif page == "Search & Identify":
-    st.title("Identify & Value")
-    input_method = st.radio("Input Source", ["Camera", "Upload"], horizontal=True)
+# Using Query Params to handle the "Pages" since we hid the sidebar
+params = st.query_params
+current_page = params.get("page", "Home")
+
+if current_page == "Home":
+    st.title("TraidLive")
+    st.markdown("<h3 style='color: #8E8E93;'>Welcome! Scan up to eight cards with one photo to find current listings.</h3>", unsafe_allow_html=True)
     
-    if input_method == "Camera":
-        uploaded_file = st.camera_input("Snap Card")
+    # Hero Scanner
+    source = st.radio("Select Source", ["Camera", "Gallery"], horizontal=True)
+    if source == "Camera":
+        img_input = st.camera_input("Scanner Active")
     else:
-        uploaded_file = st.file_uploader("Upload Image", type=['jpg', 'jpeg', 'png'])
+        img_input = st.file_uploader("Drop image here")
 
-    if uploaded_file:
-        crops = detect_cards(uploaded_file)
-        if st.button("AI Identify Batch"):
-            st.session_state['suggestions'] = auto_label_crops(crops)
-            st.rerun()
+    if img_input:
+        with st.spinner("Processing Assets..."):
+            img_input.seek(0)
+            crops = detect_cards(img_input)
             
-        if 'suggestions' in st.session_state:
+            if st.button("AI BATCH IDENTIFY"):
+                st.session_state['results'] = auto_label_crops(crops)
+        
+        if 'results' in st.session_state:
+            st.divider()
             cols = st.columns(4)
-            for i, name in enumerate(st.session_state['suggestions']):
+            for i, name in enumerate(st.session_state['results']):
                 with cols[i % 4]:
-                    st.text_input(f"Asset {i+1}", value=name, key=f"inp_{i}")
-                    if st.button(f"Analyze {i+1}", key=f"btn_{i}"):
-                        val, pts = fetch_market_valuation(name, "PSA 10")
-                        st.success(f"Avg: ${val:,.2f}")
+                    st.image(cv2.cvtColor(crops[i], cv2.COLOR_BGR2RGB), use_container_width=True)
+                    st.session_state['results'][i] = st.text_input(f"ID {i+1}", value=name, key=f"n_{i}")
+                    
+                    if st.button(f"CHECK MARKET {i+1}", key=f"p_{i}"):
+                        for grade in ["PSA 10", "PSA 9", "PSA 8", "Ungraded"]:
+                            avg, pts = fetch_market_valuation(name, grade)
+                            st.markdown(f"**{grade}**: <span class='price-text'>${avg:,.2f}</span>", unsafe_allow_html=True)
 
-# --- PAGE: INVENTORY ---
-elif page == "Inventory":
-    st.title("Asset Vault")
-    st.write("Your synchronized historical ledger.")
-    if st.button("Refresh Vault"):
-        res = supabase.table("inventory").select("*").eq("owner", owner_id).execute()
-        st.dataframe(pd.DataFrame(res.data), use_container_width=True)
+elif current_page == "Inventory":
+    st.title("Vault")
+    st.info("Inventory details will populate here.")
 
-# --- PAGE: PROFILE ---
-elif page == "Profile":
-    st.title("Collector Profile")
-    st.write(f"Account: **{owner_id}**")
-    st.button("Account Settings")
-    st.button("API Integration")
+elif current_page == "Search":
+    st.title("Search Market")
+    manual_q = st.text_input("Manual Search (eBay Data)")
+
+elif current_page == "Profile":
+    st.title("User Settings")
+    st.write(f"Logged in as: {owner_id}")
