@@ -120,13 +120,14 @@ st.markdown("""
     /* iOS Style Buttons */
     .stButton > button { background-color: #0A84FF; color: white; border-radius: 12px; border: none; padding: 10px 24px; font-weight: 600; transition: all 0.2s ease; }
     .stButton > button:hover { background-color: #409CFF; color: white; transform: scale(1.02); }
-    /* Audit Box for links */
-    .audit-box { background-color: #1C1C1E; padding: 12px; border-radius: 8px; border: 1px solid #3A3A3C; margin-top: 10px; font-size: 13px; }
-    .audit-header { color: #8E8E93; font-size: 11px; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px; }
-    .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #2C2C2E; }
+    /* Dropdown UI cleanups */
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    .audit-header { color: #8E8E93; font-size: 11px; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px; font-weight: bold; }
+    .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2C2C2E; }
     .sold-row:last-child { border-bottom: none; }
-    .sold-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 10px; color: #D1D1D6; }
-    .sold-price { color: #34C759; font-weight: 600; margin-right: 10px; }
+    .sold-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 10px; color: #D1D1D6; font-size: 13px; }
+    .sold-price { color: #34C759; font-weight: 600; margin-right: 10px; font-size: 13px; }
     .sold-link { color: #0A84FF; text-decoration: none; font-size: 12px; font-weight: 500; }
     /* Dataframe styling */
     .stDataFrame { background-color: #1C1C1E; border-radius: 15px; }
@@ -177,19 +178,8 @@ if uploaded_file:
                     
                     if st.button(f"Check Price {i+1}", key=f"chk_{i}"):
                         name = st.session_state['suggestions'][i]
-                        with st.spinner("Fetching full grade breakdown..."):
-                            
-                            def generate_audit_html(label, val, points):
-                                if not points:
-                                    return f"<div class='audit-box'><div class='audit-header'>{label}</div><div style='color:#FF453A;'>No listings found.</div></div>"
-                                
-                                rows = ""
-                                for p in points:
-                                    rows += f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a class='sold-link' href='{p['url']}' target='_blank'>View</a></div>"
-                                
-                                return f"<div class='audit-box'><div class='audit-header'>{label} - Avg: ${val:,.2f}</div>{rows}</div>"
-
-                            # Loop through all the requested grades
+                        with st.spinner("Calculating market averages..."):
+                            html_rows = ""
                             grades_to_check = [
                                 ("PSA 10", "PSA 10"),
                                 ("PSA 9", "PSA 9"),
@@ -201,7 +191,72 @@ if uploaded_file:
                             
                             for label, grade_query in grades_to_check:
                                 val, points = fetch_market_valuation(name, grade_query)
-                                st.markdown(generate_audit_html(label, val, points), unsafe_allow_html=True)
+                                
+                                # Construct the eBay link for ACTIVE listings for the final button
+                                if grade_query == "Ungraded":
+                                    aq = f"{name} -PSA -BGS -SGC -CGC -graded"
+                                else:
+                                    aq = f"{name} {grade_query}"
+                                active_link = f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(aq)}"
+                                
+                                if not points:
+                                    html_rows += f"""
+                                    <tr style='border-bottom: 1px solid #2C2C2E;'>
+                                        <td style='padding: 12px 8px;'><strong>{label}</strong></td>
+                                        <td style='padding: 12px 8px; text-align: right; color:#FF453A; font-size: 13px;'>No listings found</td>
+                                    </tr>
+                                    """
+                                else:
+                                    listings_html = ""
+                                    for p in points:
+                                        listings_html += f"""
+                                        <div class='sold-row'>
+                                            <span class='sold-title'>{p['title']}</span>
+                                            <span class='sold-price'>${p['price']:,.2f}</span>
+                                            <a class='sold-link' href='{p['url']}' target='_blank'>Sold Link</a>
+                                        </div>
+                                        """
+                                    
+                                    # Active Listings Link at the bottom of the expander
+                                    listings_html += f"""
+                                        <div style='margin-top: 15px; text-align: center;'>
+                                            <a href='{active_link}' target='_blank' style='color: #000000; background-color: #FFFFFF; font-size: 12px; text-decoration: none; font-weight: 700; padding: 10px 16px; border-radius: 8px; display: block; width: 100%; text-align: center; transition: 0.2s;'>🔍 View Active Listings on eBay</a>
+                                        </div>
+                                    """
+                                    
+                                    html_rows += f"""
+                                    <tr style='border-bottom: 1px solid #2C2C2E;'>
+                                        <td style='padding: 12px 8px; vertical-align: top;'><strong>{label}</strong></td>
+                                        <td style='padding: 12px 8px; text-align: right; vertical-align: top;'>
+                                            <details style='cursor: pointer;'>
+                                                <summary style='color: #34C759; font-weight: 700; outline: none;'>
+                                                    ${val:,.2f} <span style='font-size:10px; color:#8E8E93; margin-left: 5px;'>▼</span>
+                                                </summary>
+                                                <div style='margin-top: 12px; background: #151516; padding: 12px; border-radius: 8px; border: 1px solid #3A3A3C; text-align: left;'>
+                                                    <div class='audit-header'>SOLD DATA ({len(points)} ITEMS)</div>
+                                                    {listings_html}
+                                                </div>
+                                            </details>
+                                        </td>
+                                    </tr>
+                                    """
+                                    
+                            full_table = f"""
+                            <div style='background-color: #1C1C1E; border-radius: 12px; padding: 10px; border: 1px solid #3A3A3C; margin-top: 15px;'>
+                                <table style='width: 100%; border-collapse: collapse; font-size: 14px;'>
+                                    <thead>
+                                        <tr style='border-bottom: 1px solid #3A3A3C; color: #8E8E93;'>
+                                            <th style='text-align: left; padding: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;'>Grade</th>
+                                            <th style='text-align: right; padding: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;'>Avg Price (Click to view)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {html_rows}
+                                    </tbody>
+                                </table>
+                            </div>
+                            """
+                            st.markdown(full_table, unsafe_allow_html=True)
     else:
         st.warning("No card contours detected.")
 
