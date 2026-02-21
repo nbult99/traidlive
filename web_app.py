@@ -316,10 +316,11 @@ def display_pricing_table(raw_name):
 # --- 5. INTERFACE ---
 st.markdown("""
 <div class="nav-container">
-    <a class="nav-item" href="/?page=Home">Home</a>
-    <a class="nav-item" href="/?page=Trending">Trending</a>
-    <a class="nav-item" href="/?page=Profile">Profile</a>
-    <a class="nav-item" href="/?page=About">About Us</a>
+    <a class="nav-item" href="/?page=Home" target="_self">Home</a>
+    <a class="nav-item" href="/?page=Vault" target="_self">Vault</a>
+    <a class="nav-item" href="/?page=Trending" target="_self">Trending</a>
+    <a class="nav-item" href="/?page=Profile" target="_self">Profile</a>
+    <a class="nav-item" href="/?page=About" target="_self">About Us</a>
 </div>
 """, unsafe_allow_html=True)
 
@@ -331,9 +332,14 @@ main_col, empty_right_pad = st.columns([0.85, 0.15])
 with main_col:
     if page == "Home":
         st.title("TraidLive")
-        st.markdown('<p class="welcome-text">Welcome! Upload a photo with up to 8 cards to search current listings.</p>', unsafe_allow_html=True)
         
-        # Clean separation of inputs using tabs
+        # 1. Custom Welcome Greeting
+        if st.session_state.get('logged_in') and 'user' in st.session_state:
+            username = st.session_state['user'].email.split('@')[0]
+            st.markdown(f'<p class="welcome-text">Welcome back, {username}! Upload a photo with up to 8 cards to search current listings.</p>', unsafe_allow_html=True)
+        else:
+            st.markdown('<p class="welcome-text">Welcome! Upload a photo with up to 8 cards to search current listings.</p>', unsafe_allow_html=True)
+        
         search_tab, upload_tab = st.tabs(["🔍 Search with Text", "📸 Upload Photo"])
         
         with search_tab:
@@ -348,16 +354,25 @@ with main_col:
             
             img_input = None
             if upload_option == "Use Camera":
-                img_input = st.camera_input("Scanner")
+                # 2. Defer Camera Access Logic
+                if not st.session_state.get('camera_active'):
+                    if st.button("📷 Start Camera"):
+                        st.session_state['camera_active'] = True
+                        st.rerun()
+                else:
+                    img_input = st.camera_input("Scanner")
+                    if st.button("❌ Close Camera"):
+                        st.session_state['camera_active'] = False
+                        st.rerun()
             else:
                 img_input = st.file_uploader("Select Image", type=['jpg','jpeg','png'])
+                st.session_state['camera_active'] = False # Reset if they switch tabs
 
             if img_input:
                 asset_crops = detect_cards(img_input)
                 if asset_crops:
                     st.success(f"Detected {len(asset_crops)} card(s).")
                     
-                    # UPDATED: Single click automates both ID and Pricing
                     if st.button("Identify Card/s and Check Price"):
                         with st.spinner("AI is analyzing text and fetching market data..."):
                             st.session_state['scan_results'] = auto_label_crops(asset_crops)
@@ -368,50 +383,70 @@ with main_col:
                 
                 if 'scan_results' in st.session_state:
                     st.divider()
+                    
+                    # 3. Add All Cards to Vault Button
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        if st.button("💾 Save ALL to Vault", type="primary"):
+                            if st.session_state.get('logged_in'):
+                                saved_count = 0
+                                with st.spinner("Saving collection to vault..."):
+                                    for name in st.session_state['scan_results']:
+                                        display_name = name
+                                        psa_cert = "None"
+                                        if "| PSA:" in name:
+                                            parts = name.split("| PSA:")
+                                            display_name = parts[0].strip()
+                                            psa_cert = re.sub(r'\D', '', parts[1])
+                                            
+                                        # Quick price fetch for saving
+                                        val, _ = fetch_market_valuation(display_name, "Ungraded")
+                                        success = save_card_to_vault(st.session_state['user'].id, display_name, psa_cert, "RAW", val)
+                                        if success: saved_count += 1
+                                st.success(f"Saved {saved_count} cards to your Vault!")
+                            else:
+                                st.error("Please log in via the Profile tab to save cards.")
+
+                    st.markdown("<br>", unsafe_allow_html=True)
                     grid = st.columns(4)
+                    
                     for i, name in enumerate(st.session_state['scan_results']):
                         with grid[i % 4]:
                             st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
                             
-                            # --- PARSE THE AI RESULT ---
                             display_name = name
                             psa_cert = None
                             if "| PSA:" in name:
                                 parts = name.split("| PSA:")
                                 display_name = parts[0].strip()
-                                # Extract just the numbers
                                 psa_cert = re.sub(r'\D', '', parts[1])
                             
                             current_name = st.text_input(f"Asset {i+1}", value=sanitize_card_name(display_name), key=f"sn_{i}")
                             
-                            # --- PSA VERIFICATION UI ---
                             if psa_cert and len(psa_cert) >= 7:
                                 is_valid, status = verify_psa_cert(psa_cert)
-    
                                 if is_valid:
                                     st.markdown(f"✅ **Verified:** [PSA {psa_cert}](https://www.psacard.com/cert/{psa_cert})", unsafe_allow_html=True)
                                 elif status == "API_OFFLINE":
-                                    # Just show the link without the "Verified" checkmark so it's still useful
                                     st.markdown(f"🔗 [View on PSA Website](https://www.psacard.com/cert/{psa_cert})", unsafe_allow_html=True)
                                 elif status == "Not Found":
                                     st.markdown(f"⚠️ **PSA Alert:** {psa_cert} (Not Found)", unsafe_allow_html=True)
 
-                            # Fallback manual trigger if they edit the text
                             if st.button(f"Update Price Check", key=f"sp_{i}"):
                                 st.session_state['auto_price_check'] = True
                                 
-                            # AUTOMATED PRICING TRIGGER
                             if st.session_state.get('auto_price_check'):
+                                val, _ = fetch_market_valuation(current_name, "Ungraded")
                                 display_pricing_table(current_name)
                                 
-                                # AI History Lore Button
                                 if st.button("🤖 About this card", key=f"about_{i}"):
                                     with st.spinner("Consulting AI Lore..."):
                                         st.session_state[f"history_{i}"] = generate_card_history(current_name)
                                 
                                 if f"history_{i}" in st.session_state:
                                     st.info(st.session_state[f"history_{i}"])
-                            # THE NEW SAVE BUTTON
+                                
+                                # 4. Individual Save Button
                                 if st.button("💾 Save to Vault", key=f"save_{i}"):
                                     if st.session_state.get('logged_in'):
                                         success = save_card_to_vault(
@@ -424,14 +459,36 @@ with main_col:
                                         if success: st.toast("✅ Asset secured in Vault!")
                                     else:
                                         st.warning("Please log in via the Profile tab to save cards.")
+
+    # 5. The New Vault Page
+    elif page == "Vault":
+        st.title("My Vault")
+        if not st.session_state.get('logged_in'):
+            st.warning("You must be logged in to view and manage your Vault.")
+            st.markdown('<a href="/?page=Profile" target="_self"><button style="background:#00C805; color:black; padding:10px 20px; border-radius:8px; border:none; font-weight:bold; cursor:pointer;">Go to Login</button></a>', unsafe_allow_html=True)
+        else:
+            user_cards = get_user_vault(st.session_state['user'].id)
+            if user_cards:
+                import pandas as pd
+                df = pd.DataFrame(user_cards)
+                df = df[['card_name', 'grade', 'psa_cert', 'last_value', 'created_at']]
+                df.columns = ["Asset", "Grade", "PSA Cert", "Est. Value", "Date Added"]
+                df["Est. Value"] = df["Est. Value"].apply(lambda x: f"${float(x):,.2f}" if pd.notnull(x) else "$0.00")
+                df["Date Added"] = pd.to_datetime(df["Date Added"]).dt.strftime('%Y-%m-%d')
+                
+                st.dataframe(df, hide_index=True, use_container_width=True)
+                total_val = sum(c['last_value'] for c in user_cards if c.get('last_value'))
+                st.markdown(f"<h3 style='color:#00C805;'>Total Vault Value: ${total_val:,.2f}</h3>", unsafe_allow_html=True)
+            else:
+                st.info("Your vault is empty. Scan cards on the Home page to start building your collection!")
+
     elif page == "Trending":
         st.title("Trending Cards:")
         st.markdown("<p style='color: #8E8E93; margin-top: 20px;'>Market movement data populating soon...</p>", unsafe_allow_html=True)
 
     elif page == "Profile":
-        st.title("Profile Vault")
+        st.title("Account Settings")
         
-        # Initialize login state safely
         if 'logged_in' not in st.session_state:
             st.session_state['logged_in'] = False
 
@@ -442,10 +499,9 @@ with main_col:
                 st.markdown("<br>", unsafe_allow_html=True)
                 email = st.text_input("Email", key="log_user")
                 pwd = st.text_input("Password", type="password", key="log_pass")
-                if st.button("Access Vault", key="btn_login"):
+                if st.button("Login", key="btn_login"):
                     with st.spinner("Authenticating..."):
                         try:
-                            # Official Supabase Login Call
                             res = supabase.auth.sign_in_with_password({"email": email, "password": pwd})
                             st.session_state['user'] = res.user
                             st.session_state['logged_in'] = True
@@ -465,33 +521,7 @@ with main_col:
                         except Exception as e:
                             st.error(f"Error: {e}")
         else:
-            st.success(f"Welcome back! Logged in as: {st.session_state['user'].email}")
-            
-            st.divider()
-            st.markdown("### Current Inventory")
-            
-            # Fetch real data instead of mock data
-            user_cards = get_user_vault(st.session_state['user'].id)
-            
-            if user_cards:
-                import pandas as pd
-                df = pd.DataFrame(user_cards)
-                # Clean up the display columns
-                df = df[['card_name', 'grade', 'psa_cert', 'last_value', 'created_at']]
-                df.columns = ["Asset", "Grade", "PSA Cert", "Est. Value", "Date Added"]
-                
-                # Format the price column beautifully
-                df["Est. Value"] = df["Est. Value"].apply(lambda x: f"${float(x):,.2f}" if pd.notnull(x) else "$0.00")
-                df["Date Added"] = pd.to_datetime(df["Date Added"]).dt.strftime('%Y-%m-%d')
-                
-                st.dataframe(df, hide_index=True, use_container_width=True)
-                
-                # Calculate total vault value
-                total_val = sum(c['last_value'] for c in user_cards if c.get('last_value'))
-                st.markdown(f"<h4 style='color:#00C805;'>Total Vault Value: ${total_val:,.2f}</h4>", unsafe_allow_html=True)
-            else:
-                st.info("Your vault is currently empty. Scan some cards on the Home page to add them!")
-            
+            st.success(f"Logged in securely as: {st.session_state['user'].email}")
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Log Out"):
                 supabase.auth.sign_out()
