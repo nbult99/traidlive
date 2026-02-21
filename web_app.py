@@ -16,7 +16,7 @@ EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "")
 
 @st.cache_resource
 def init_connections():
-    s_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    s_client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
     h_client = InferenceClient(api_key=HF_TOKEN) if HF_TOKEN else None
     return s_client, h_client
 
@@ -48,7 +48,7 @@ def sanitize_card_name(raw_input):
     clean = str(raw_input)
     if isinstance(raw_input, dict):
         clean = raw_input.get('full', str(raw_input))
-    for artifact in ["{", "}", "'", ":", "full", "year", "brand", "player", "num"]:
+    for artifact in ["{", "}", "'", ":", "full", "year", "brand", "player", "num", '"']:
         clean = clean.replace(artifact, "")
     return clean.strip()
 
@@ -59,13 +59,14 @@ def fetch_market_valuation(clean_name, grade_filter=""):
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
     try:
-        token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, timeout=5)
+        token_resp = requests.post(
+            token_url, 
+            headers={"Authorization": f"Basic {encoded_auth}"}, 
+            data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, 
+            timeout=5
+        )
         token = token_resp.json().get("access_token")
         
-        # --- THREE-TIER SEARCH STRATEGY ---
-        # 1. Exact Name + Grade
-        # 2. Name (No #) + Grade
-        # 3. First 3 words of name + Grade
         queries = [
             f"{clean_name} {grade_filter} sold -reprint -rp",
             f"{clean_name.replace('#', '')} {grade_filter} sold -reprint",
@@ -99,56 +100,94 @@ def fetch_market_valuation(clean_name, grade_filter=""):
                 
         if not points: return 0.0, []
         return (sum(p['price'] for p in points) / len(points)), points
-    except: return 0.0, []
+    except Exception as e: 
+        print(f"Ebay API Error: {e}")
+        return 0.0, []
 
 def auto_label_crops(crops):
+    if not hf_client:
+        return ["API Key Missing"] * len(crops)
+        
     labels = []
+    # UPDATED PROMPT: Force OCR and explicitly ban guessing.
+    prompt = """
+    You are a strict OCR text reader for sports cards. 
+    1. Look at the text actually printed on the card.
+    2. DO NOT guess the player based on the uniform or team colors. Read the name exactly as printed.
+    3. Return ONLY a single line formatted strictly as: [Year] [Brand] [Player] [Card Number].
+    Example: 2024 Panini Prizm Drake Maye 301
+    Do not include any other words, explanations, or JSON formatting.
+    """
+    
     for crop in crops:
         try:
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
-            prompt = "Return ONLY the Year, Brand, Player, and Card # as a single line. Example: 2000 Bowman Tom Brady 236. NO DICTIONARIES."
-            resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
+            
+            resp = hf_client.chat_completion(
+                model=HF_MODEL, 
+                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], 
+                max_tokens=60,
+                temperature=0.1 # Lower temperature makes the AI less "creative" and more analytical
+            )
             labels.append(resp.choices[0].message.content.strip())
-        except: labels.append("ID Error")
+        except Exception as e: 
+            print(f"HF Error: {e}")
+            labels.append("ID Error")
     return labels
 
 def detect_cards(image_file):
+    image_file.seek(0) # Ensure file pointer is at the start
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
+    
     ratio = 1200.0 / img.shape[0]
     img_work = cv2.resize(img, (int(img.shape[1] * ratio), 1200))
     gray = cv2.cvtColor(img_work, cv2.COLOR_BGR2GRAY)
-    edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 30, 150)
+    
+    # Improved image processing to find edges better
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edged = cv2.Canny(blur, 30, 150)
     dilated = cv2.dilate(edged, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=2)
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
     crops = []
-    for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:8]:
-        if cv2.contourArea(cnt) > 20000:
+    # Filter by Area AND Aspect Ratio to ensure it's actually a card
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True):
+        area = cv2.contourArea(cnt)
+        if area > 20000:
             x, y, w, h = cv2.boundingRect(cnt)
-            pad = 10
-            y1, y2 = max(0, y-pad), min(img_work.shape[0], y+h+pad)
-            x1, x2 = max(0, x-pad), min(img_work.shape[1], x+w+pad)
-            crops.append(img_work[y1:y2, x1:x2])
+            aspect_ratio = max(w, h) / float(min(w, h))
+            
+            # Standard cards have an aspect ratio around 1.4. This allows for some perspective warping.
+            if 1.2 <= aspect_ratio <= 1.8:
+                pad = 10
+                y1, y2 = max(0, y-pad), min(img_work.shape[0], y+h+pad)
+                x1, x2 = max(0, x-pad), min(img_work.shape[1], x+w+pad)
+                crops.append(img_work[y1:y2, x1:x2])
+                
+                if len(crops) == 8: # Stop cleanly at 8 cards
+                    break
     return crops
 
 def display_pricing_table(raw_name):
     clean_name = sanitize_card_name(raw_name)
     html_rows = ""
-    for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("RAW", "Ungraded")]:
-        val, points = fetch_market_valuation(clean_name, gr_query)
-        if points:
-            list_html = "".join([f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a href='{p['url']}' target='_blank' style='color:#0A84FF; text-decoration:none;'>Link</a></div>" for p in points])
-            active_search = f"{clean_name} {gr_query}"
-            if gr_query == "Ungraded": active_search = f"{clean_name} -graded"
-            active_link = f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(active_search)}"
-            list_html += f"<div style='margin-top:10px;'><a href='{active_link}' target='_blank' style='color:#000; background:#FFF; text-decoration:none; font-weight:700; padding:8px; border-radius:5px; display:block; text-align:center;'>🔍 View Active Listings</a></div>"
-            html_rows += f"<tr><td style='padding:10px 0;'><strong>{label}</strong></td><td style='text-align:right;'><details><summary style='color:#00C805; font-weight:bold;'>${val:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{list_html}</div></details></td></tr>"
-    
+    with st.spinner(f"Pulling comps for {clean_name}..."):
+        for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("RAW", "Ungraded")]:
+            val, points = fetch_market_valuation(clean_name, gr_query)
+            if points:
+                list_html = "".join([f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a href='{p['url']}' target='_blank' style='color:#0A84FF; text-decoration:none;'>Link</a></div>" for p in points])
+                active_search = f"{clean_name} {gr_query}"
+                if gr_query == "Ungraded": active_search = f"{clean_name} -graded"
+                active_link = f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(active_search)}"
+                list_html += f"<div style='margin-top:10px;'><a href='{active_link}' target='_blank' style='color:#000; background:#FFF; text-decoration:none; font-weight:700; padding:8px; border-radius:5px; display:block; text-align:center;'>🔍 View Active Listings</a></div>"
+                html_rows += f"<tr><td style='padding:10px 0;'><strong>{label}</strong></td><td style='text-align:right;'><details><summary style='color:#00C805; font-weight:bold;'>${val:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{list_html}</div></details></td></tr>"
+        
     if html_rows:
         st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:15px; border:1px solid #30363D; margin-top:10px;'><table style='width:100%; border-collapse:collapse;'>{html_rows}</table></div>", unsafe_allow_html=True)
     else:
-        st.warning(f"Market analysis failed for: {clean_name}")
+        st.warning(f"Market analysis failed for: {clean_name}. Ensure spelling is correct or refine the search.")
 
 # --- 5. INTERFACE ---
 st.markdown("""<div class="nav-container">
@@ -177,12 +216,15 @@ if page == "Home":
         img_input = st.camera_input("Scanner") if upload_option == "Use Camera" else st.file_uploader("Select Image", type=['jpg','jpeg','png'])
 
         if img_input:
-            img_input.seek(0)
             asset_crops = detect_cards(img_input)
             if asset_crops:
+                st.success(f"Detected {len(asset_crops)} card(s).")
                 if st.button("AI BATCH IDENTIFY"):
-                    st.session_state['scan_results'] = auto_label_crops(asset_crops)
-                    st.session_state['scan_crops'] = asset_crops
+                    with st.spinner("AI is analyzing text on cards..."):
+                        st.session_state['scan_results'] = auto_label_crops(asset_crops)
+                        st.session_state['scan_crops'] = asset_crops
+            else:
+                st.warning("No cards detected. Try placing them on a contrasting background.")
             
             if 'scan_results' in st.session_state:
                 grid = st.columns(4)
@@ -193,4 +235,5 @@ if page == "Home":
                         if st.button(f"Analyze {i+1}", key=f"sp_{i}"):
                             display_pricing_table(st.session_state['scan_results'][i])
 
-elif page == "Inventory": st.title("Vault")
+elif page == "Inventory": 
+    st.title("Vault")
