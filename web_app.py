@@ -94,6 +94,7 @@ def sanitize_card_name(raw_input):
     return clean.strip()
 
 # --- 4. RESILIENT MARKET ENGINE ---
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_market_valuation(clean_name, grade_filter=""):
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
@@ -205,7 +206,21 @@ def auto_label_crops(crops):
             print(f"HF Error: {e}")
             labels.append("ID Error")
     return labels
-
+@st.cache_data(ttl=86400, show_spinner=False)
+def generate_card_history(card_name):
+    if not hf_client:
+        return "API Key Missing. Cannot generate history."
+    prompt = f"Write a short, engaging 2-3 sentence paragraph about the history and significance of this sports card: {card_name}. Do not include formatting, just the text."
+    try:
+        resp = hf_client.chat_completion(
+            model=HF_MODEL, 
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}], 
+            max_tokens=150,
+            temperature=0.6
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e: 
+        return f"Could not generate history: {e}"
 def detect_cards(image_file):
     image_file.seek(0) # Ensure file pointer is at the start
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
@@ -299,14 +314,16 @@ with main_col:
                 img_input = st.file_uploader("Select Image", type=['jpg','jpeg','png'])
 
             if img_input:
-                # The backend logic remains perfectly untouched
                 asset_crops = detect_cards(img_input)
                 if asset_crops:
                     st.success(f"Detected {len(asset_crops)} card(s).")
-                    if st.button("AI BATCH IDENTIFY"):
-                        with st.spinner("AI is analyzing text on cards..."):
+                    
+                    # UPDATED: Single click automates both ID and Pricing
+                    if st.button("Identify Card/s and Check Price"):
+                        with st.spinner("AI is analyzing text and fetching market data..."):
                             st.session_state['scan_results'] = auto_label_crops(asset_crops)
                             st.session_state['scan_crops'] = asset_crops
+                            st.session_state['auto_price_check'] = True
                 else:
                     st.warning("No cards detected. Try placing them on a contrasting background.")
                 
@@ -316,10 +333,24 @@ with main_col:
                     for i, name in enumerate(st.session_state['scan_results']):
                         with grid[i % 4]:
                             st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
-                            st.session_state['scan_results'][i] = st.text_input(f"Asset {i+1}", value=sanitize_card_name(name), key=f"sn_{i}")
-                            if st.button(f"Analyze {i+1}", key=f"sp_{i}"):
-                                display_pricing_table(st.session_state['scan_results'][i])
-
+                            
+                            current_name = st.text_input(f"Asset {i+1}", value=sanitize_card_name(name), key=f"sn_{i}")
+                            
+                            # Fallback manual trigger if they edit the text
+                            if st.button(f"Update Price Check", key=f"sp_{i}"):
+                                st.session_state['auto_price_check'] = True
+                                
+                            # AUTOMATED PRICING TRIGGER
+                            if st.session_state.get('auto_price_check'):
+                                display_pricing_table(current_name)
+                                
+                                # NEW: AI History Lore Button
+                                if st.button("🤖 About this card", key=f"about_{i}"):
+                                    with st.spinner("Consulting AI Lore..."):
+                                        st.session_state[f"history_{i}"] = generate_card_history(current_name)
+                                
+                                if f"history_{i}" in st.session_state:
+                                    st.info(st.session_state[f"history_{i}"])
     elif page == "Trending":
         st.title("Trending Cards:")
         st.markdown("<p style='color: #8E8E93; margin-top: 20px;'>Market movement data populating soon...</p>", unsafe_allow_html=True)
