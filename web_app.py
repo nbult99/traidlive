@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import base64
 import pandas as pd
-import re # Added for strict string matching
+import re
 from huggingface_hub import InferenceClient
 from supabase import create_client
 
@@ -44,18 +44,16 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. CLINICAL ACCURACY ENGINES ---
+# --- 3. MARKET DATA ENGINE (SMART GRADE FILTER) ---
 
 def fetch_market_valuation(card_id_data, grade_filter=""):
     """
-    STRICT MATCHING: Verifies Year, Brand, Player, and Number against eBay titles.
-    card_id_data: dict containing {'year', 'brand', 'player', 'num'}
+    SMART FILTER: Strict on Grade, Flexible on Metadata.
     """
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
-    # Clean inputs for matching
     target_year = str(card_id_data.get('year', '')).strip()
     target_brand = str(card_id_data.get('brand', '')).strip().upper()
     target_player = str(card_id_data.get('player', '')).strip().upper()
@@ -65,12 +63,12 @@ def fetch_market_valuation(card_id_data, grade_filter=""):
         token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
         token = token_resp.json().get("access_token")
         
-        # Build search query
-        search_query = f"{target_year} {target_brand} {target_player} {target_num} {grade_filter} sold -reprint -rp"
+        # Build query (Broad search to capture lazy titles)
+        search_query = f"{target_year} {target_brand} {target_player} {target_num} {grade_filter} sold -reprint"
         if grade_filter == "Ungraded":
-            search_query = f"{target_year} {target_brand} {target_player} {target_num} sold -PSA -BGS -SGC -CGC -graded -reprint"
+            search_query = f"{target_year} {target_brand} {target_player} {num} sold -PSA -BGS -SGC -CGC -graded -reprint"
             
-        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(search_query)}&category_ids=212&limit=30"
+        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(search_query)}&category_ids=212&limit=25"
         resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"})
         items = resp.json().get("itemSummaries", [])
         
@@ -78,21 +76,20 @@ def fetch_market_valuation(card_id_data, grade_filter=""):
         for item in items:
             title = item.get('title', '').upper()
             
-            # --- THE CLINICAL VERIFICATION GATE ---
-            # 1. Year must be present
-            has_year = target_year in title
-            # 2. Player name must be present (checking individual parts to handle 'Brady, Tom')
-            has_player = all(part in title for part in target_player.split() if len(part) > 2)
-            # 3. Brand must be present
-            has_brand = any(b in title for b in target_brand.split() if len(b) > 2)
-            # 4. Card Number must match (using regex to find the number as its own word)
-            has_num = re.search(rf"\b{target_num}\b", title) is not None
+            # --- THE GRADE FIREWALL ---
+            # If we want a PSA 10, we EXCLUDE any title that explicitly mentions 9, 8, 7, 6, 5 etc.
+            if "PSA" in grade_filter:
+                grade_val = grade_filter.split()[-1] # Gets '10' from 'PSA 10'
+                other_grades = ["PSA 10", "PSA 9", "PSA 8", "PSA 7", "PSA 6", "PSA 5"]
+                # If title mentions a DIFFERENT PSA grade than the one we are currently looking for, skip it.
+                if any(g in title for g in other_grades if g != grade_filter):
+                    continue
             
-            # 5. Grade match (if PSA 10, title shouldn't say PSA 9)
-            if grade_filter != "Ungraded" and grade_filter not in title:
-                continue
-
-            if has_year and has_player and has_brand and has_num:
+            # --- THE FUZZY DATA CHECK ---
+            # As long as the PLAYER is in the title, we accept it (Flexible on year/num/brand)
+            has_player = all(part in title for part in target_player.split() if len(part) > 2)
+            
+            if has_player:
                 points.append({"title": item['title'], "price": float(item['price']['value']), "url": item.get('itemWebUrl', '#')})
             
             if len(points) >= 10: break
@@ -103,26 +100,18 @@ def fetch_market_valuation(card_id_data, grade_filter=""):
     except: return 0.0, []
 
 def auto_label_crops(crops):
-    """Returns a list of dictionaries with clinical card data."""
     labels = []
     for crop in crops:
         try:
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
-            # AI Prompt specifically formatted for parsing
-            prompt = "Identify this card precisely. Return ONLY: Year | Brand | Player | Card #. Example: 2000 | Bowman | Tom Brady | 236"
+            prompt = "Precisely identify: Year | Brand | Player | Card #. Example: 2000 | Bowman | Tom Brady | 236"
             resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
-            
             raw = resp.choices[0].message.content.strip()
             parts = [p.strip() for p in raw.split('|')]
-            
             if len(parts) >= 4:
-                labels.append({
-                    "full": f"{parts[0]} {parts[1]} {parts[2]} #{parts[3]}",
-                    "year": parts[0], "brand": parts[1], "player": parts[2], "num": parts[3]
-                })
-            else:
-                labels.append({"full": "ID Failed", "year": "", "brand": "", "player": "", "num": ""})
+                labels.append({"full": f"{parts[0]} {parts[1]} {parts[2]} #{parts[3]}", "year": parts[0], "brand": parts[1], "player": parts[2], "num": parts[3]})
+            else: labels.append({"full": "ID Failed", "year": "", "brand": "", "player": "", "num": ""})
         except: labels.append({"full": "Error", "year": "", "brand": "", "player": "", "num": ""})
     return labels
 
@@ -146,18 +135,16 @@ def detect_cards(image_file):
     return crops
 
 def display_pricing_table(card_data):
-    """Accepts a dict of card info and renders the table."""
     html_rows = ""
     for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("RAW", "Ungraded")]:
         val, points = fetch_market_valuation(card_data, gr_query)
         if points:
             list_html = "".join([f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a href='{p['url']}' target='_blank' style='color:#0A84FF; text-decoration:none;'>Link</a></div>" for p in points])
             html_rows += f"<tr><td style='padding:8px 0;'>{label}</td><td style='text-align:right;'><details><summary style='color:#00C805; font-weight:bold;'>${val:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{list_html}</div></details></td></tr>"
-    
     if html_rows:
         st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:15px; border:1px solid #30363D;'><table style='width:100%;'>{html_rows}</table></div>", unsafe_allow_html=True)
     else:
-        st.warning("No clinical matches found in current market data.")
+        st.warning("No listings found.")
 
 # --- 4. THE HYBRID INTERFACE ---
 
@@ -172,46 +159,37 @@ page = st.query_params.get("page", "Home")
 
 if page == "Home":
     st.title("TraidLive")
-    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.1 | Clinical Identification Active</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.2 | Smart Grade Sorting Active</h3>", unsafe_allow_html=True)
     
-    # 1. MANUAL TEXT SEARCH
-    search_q = st.text_input("Quick Asset Lookup", placeholder="Year Brand Player Card# (e.g. 2020 Prizm Joe Burrow 307)")
+    search_q = st.text_input("Quick Lookup", placeholder="Year Brand Player Card#")
     if search_q and st.button("GET MARKET DATA"):
         p = search_q.replace('#', '').split()
         if len(p) >= 4:
-            manual_data = {"year": p[0], "brand": p[1], "player": ' '.join(p[2:-1]), "num": p[-1]}
-            display_pricing_table(manual_data)
+            display_pricing_table({"year": p[0], "brand": p[1], "player": ' '.join(p[2:-1]), "num": p[-1]})
 
     st.divider()
 
-    # 2. IMAGE SCANNER
     input_type = st.radio("Input Method", ["Search with Text", "Upload Image"], horizontal=True)
 
     if input_type == "Upload Image":
         upload_option = st.radio("Source:", ["Browse Files", "Use Camera"], horizontal=True)
-        img_input = st.camera_input("Scanner Active") if upload_option == "Use Camera" else st.file_uploader("Select Image", type=['jpg','jpeg','png'])
+        img_input = st.camera_input("Scanner") if upload_option == "Use Camera" else st.file_uploader("Select Image", type=['jpg','jpeg','png'])
 
         if img_input:
-            with st.spinner("Isolating individual cards..."):
-                img_input.seek(0)
-                asset_crops = detect_cards(img_input)
-                
-                if asset_crops:
-                    st.write(f"Verified {len(asset_crops)} separate assets.")
-                    if st.button("AI BATCH IDENTIFY"):
-                        st.session_state['scan_results'] = auto_label_crops(asset_crops)
-                        st.session_state['scan_crops'] = asset_crops
+            img_input.seek(0)
+            asset_crops = detect_cards(img_input)
+            if asset_crops:
+                if st.button("AI BATCH IDENTIFY"):
+                    st.session_state['scan_results'] = auto_label_crops(asset_crops)
+                    st.session_state['scan_crops'] = asset_crops
             
             if 'scan_results' in st.session_state:
                 grid = st.columns(4)
                 for i, card_data in enumerate(st.session_state['scan_results']):
                     with grid[i % 4]:
                         st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
-                        # Display name but keep hidden clinical data for the search
                         display_name = st.text_input(f"Asset {i+1}", value=card_data['full'], key=f"sn_{i}")
-                        
                         if st.button(f"Analyze {i+1}", key=f"sp_{i}"):
-                            # Re-parse if user edited manually
                             p = display_name.replace('#', '').split()
                             final_data = card_data if len(p) < 4 else {"year": p[0], "brand": p[1], "player": ' '.join(p[2:-1]), "num": p[-1]}
                             display_pricing_table(final_data)
