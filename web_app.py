@@ -13,7 +13,7 @@ HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 EBAY_APP_ID = st.secrets.get("EBAY_APP_ID", "")
-EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "")
+EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "") # No longer strictly needed for Finding API, but kept for compatibility
 
 @st.cache_resource
 def init_connections():
@@ -49,50 +49,74 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. THE "STRICT SOLD" ENGINE ---
+# --- 3. THE "STRICT SOLD" ENGINE (FIXED) ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
     """
-    FORCED COMPLETED SEARCH: Filters exclusively for items with a last_sold_date.
+    FORCED COMPLETED SEARCH: Uses the eBay Finding API specifically designed for sold items.
     """
-    token_url = "https://api.ebay.com/identity/v1/oauth2/token"
-    auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
-    encoded_auth = base64.b64encode(auth_str.encode()).decode()
+    app_id = EBAY_APP_ID
+    if not app_id: return 0.0, []
     
     try:
-        # Auth Token
-        token_resp = requests.post(token_url, 
-                                 headers={"Authorization": f"Basic {encoded_auth}", "Content-Type": "application/x-www-form-urlencoded"}, 
-                                 data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
-        token = token_resp.json().get("access_token")
+        search_query = f"{card_name} {grade_filter}".strip()
+        encoded_query = requests.utils.quote(search_query)
         
-        # Look back 180 days to ensure we get data points for rare cards
-        lookback = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
-        search_query = f"{card_name} {grade_filter}"
-        query_encoded = requests.utils.quote(search_query)
+        # The Finding API 'findCompletedItems' is the only public endpoint 
+        # that reliably filters out active listings without partner-level API access.
+        url = (
+            f"https://svcs.ebay.com/services/search/FindingService/v1?"
+            f"OPERATION-NAME=findCompletedItems&"
+            f"SERVICE-VERSION=1.13.0&"
+            f"SECURITY-APPNAME={app_id}&"
+            f"RESPONSE-DATA-FORMAT=JSON&"
+            f"REST-PAYLOAD=true&"
+            f"keywords={encoded_query}&"
+            f"categoryId=212&"
+            f"itemFilter(0).name=SoldItemsOnly&"
+            f"itemFilter(0).value=true"
+        )
         
-        # FILTER: last_sold_date:[RANGE] forces the API into the Completed index.
-        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&filter=last_sold_date:[{lookback}..]&limit=5"
-        
-        headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}
-        resp = requests.get(ebay_url, headers=headers)
+        resp = requests.get(url, timeout=10)
         data = resp.json()
-        items = data.get("itemSummaries", [])
+        
+        finding_response = data.get("findCompletedItemsResponse", [{}])[0]
+        ack = finding_response.get("ack", [""])[0]
+        
+        if ack not in ["Success", "Warning"]:
+            return 0.0, []
+            
+        search_result = finding_response.get("searchResult", [{}])[0]
+        items = search_result.get("item", [])
         
         if not items: return 0.0, []
             
         points = []
-        for item in items:
-            points.append({
-                "title": item.get("title", "Unknown Card"),
-                "price": float(item['price']['value']),
-                "url": item.get("itemWebUrl", "#")
-            })
+        for item in items[:5]: # Take top 5 recent sales
+            selling_status = item.get("sellingStatus", [{}])[0]
+            state = selling_status.get("sellingState", [""])[0]
+            
+            # HARD VERIFICATION: Double-check that it actually ended with a sale
+            if state == "EndedWithSales":
+                price_str = selling_status.get("currentPrice", [{}])[0].get("__value__", "0")
+                price = float(price_str)
+                title = item.get("title", ["Unknown Card"])[0]
+                item_url = item.get("viewItemURL", ["#"])[0]
+                
+                if price > 0:
+                    points.append({
+                        "title": title,
+                        "price": price,
+                        "url": item_url
+                    })
+                    
+        if not points: return 0.0, []
             
         avg = sum(p['price'] for p in points) / len(points)
         return avg, points
         
-    except: return 0.0, []
+    except Exception as e:
+        return 0.0, []
 
 # --- 4. ORIGINAL LOGIC (RESTORED) ---
 
@@ -175,7 +199,7 @@ if uploaded_file:
                             with st.container():
                                 st.markdown(f'<div class="audit-box"><div class="audit-header">{label} RECENT SALES</div>', unsafe_allow_html=True)
                                 if not points:
-                                    st.write("No verified sales found in the last 180 days.")
+                                    st.write("No verified sales found.")
                                 else:
                                     for p in points:
                                         st.markdown(f'''
