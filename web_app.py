@@ -29,68 +29,29 @@ st.set_page_config(page_title="TraidLive", layout="wide", initial_sidebar_state=
 st.markdown("""
     <style>
     .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, system-ui, sans-serif; }
-    .stButton > button { background-color: #00C805 !important; color: #000000 !important; border-radius: 24px !important; border: none !important; font-weight: 700 !important; transition: 0.2s ease; }
+    
+    /* Neon Green Robinhood Accents */
+    .stButton > button { background-color: #00C805 !important; color: #000000 !important; border-radius: 24px !important; border: none !important; font-weight: 700 !important; transition: 0.2s ease; width: 100%; }
+    .stButton > button:hover { background-color: #00E606 !important; transform: translateY(-1px); }
+
+    /* Right-Side Navigation (Transparent) */
     .nav-container { position: fixed; right: 40px; top: 40px; z-index: 100; text-align: right; }
     .nav-item { color: rgba(255, 255, 255, 0.4); text-decoration: none; font-size: 16px; font-weight: 600; margin-bottom: 20px; display: block; transition: 0.3s; }
     .nav-item:hover { color: #00C805; }
+
+    /* Interactive Table / Results */
     details > summary { list-style: none; outline: none; cursor: pointer; }
     .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #1E2124; }
     .sold-price { color: #00C805; font-weight: 600; font-family: monospace; }
+    
+    /* Hide Sidebars */
     [data-testid="stSidebar"] { display: none; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. REFINED MULTI-CARD DETECTION ---
-def detect_cards(image_file):
-    file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, 1)
-    
-    # 1. Standardize size for processing
-    ratio = 1200.0 / img.shape[0]
-    img_work = cv2.resize(img, (int(img.shape[1] * ratio), 1200))
-    
-    # 2. Island Pre-processing (Canny + Dilation)
-    gray = cv2.cvtColor(img_work, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Canny finds the distinct edges of each card
-    edged = cv2.Canny(blur, 30, 150)
-    
-    # Dilation connects small gaps in the edges to form a solid boundary
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    dilated = cv2.dilate(edged, kernel, iterations=2)
-    
-    # 3. Find Contours
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    crops = []
-    # Sort by area (Largest to Smallest)
-    sorted_cnts = sorted(contours, key=cv2.contourArea, reverse=True)
-    
-    for cnt in sorted_cnts:
-        area = cv2.contourArea(cnt)
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        
-        # Rule 1: Area threshold (Reduced to 20k to catch smaller/further crops)
-        if area < 20000: continue 
-        
-        # Rule 2: Rectangularity check & cap at 8 cards
-        if len(approx) >= 4 and len(crops) < 8:
-            x, y, w, h = cv2.boundingRect(approx)
-            
-            # Rule 3: Flexible Aspect Ratio (Catching tilted or perspective-skewed cards)
-            aspect_ratio = float(w)/h
-            if 0.3 < aspect_ratio < 3.0:
-                # Add 10px padding for the AI Vision to see the whole card
-                pad = 10
-                y1, y2 = max(0, y-pad), min(img_work.shape[0], y+h+pad)
-                x1, x2 = max(0, x-pad), min(img_work.shape[1], x+w+pad)
-                crops.append(img_work[y1:y2, x1:x2])
-                
-    return crops
-
-# --- 4. DATA & AI (RETAINED) ---
+# --- 3. CORE ENGINES ---
 def fetch_market_valuation(card_name, grade_filter=""):
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
@@ -116,7 +77,37 @@ def auto_label_crops(crops):
         labels.append(resp.choices[0].message.content.strip())
     return labels
 
-# --- 5. TERMINAL UI ---
+def detect_cards(image_file):
+    file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+    ratio = 1200.0 / img.shape[0]
+    img_work = cv2.resize(img, (int(img.shape[1] * ratio), 1200))
+    gray = cv2.cvtColor(img_work, cv2.COLOR_BGR2GRAY)
+    edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 30, 150)
+    dilated = cv2.dilate(edged, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=2)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    crops = []
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:8]:
+        if cv2.contourArea(cnt) > 20000:
+            x, y, w, h = cv2.boundingRect(cnt)
+            pad = 10
+            y1, y2 = max(0, y-pad), min(img_work.shape[0], y+h+pad)
+            x1, x2 = max(0, x-pad), min(img_work.shape[1], x+w+pad)
+            crops.append(img_work[y1:y2, x1:x2])
+    return crops
+
+def display_pricing_table(name):
+    html_rows = ""
+    for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("RAW", "Ungraded")]:
+        val, points = fetch_market_valuation(name, gr_query)
+        if points:
+            list_html = "".join([f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a href='{p['url']}' target='_blank' style='color:#0A84FF; text-decoration:none;'>Link</a></div>" for p in points])
+            html_rows += f"<tr><td style='padding:8px 0;'>{label}</td><td style='text-align:right;'><details><summary style='color:#00C805; font-weight:bold;'>${val:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{list_html}</div></details></td></tr>"
+    st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:15px; border:1px solid #30363D;'><table style='width:100%;'>{html_rows}</table></div>", unsafe_allow_html=True)
+
+# --- 4. THE HYBRID INTERFACE ---
+
+# Fixed Nav
 st.markdown("""<div class="nav-container">
     <a class="nav-item" href="/?page=Home">Home</a>
     <a class="nav-item" href="/?page=Inventory">Inventory</a>
@@ -128,36 +119,45 @@ page = st.query_params.get("page", "Home")
 
 if page == "Home":
     st.title("TraidLive")
-    st.markdown("<h3 style='color: #8E8E93;'>Welcome! Scan up to eight cards with one photo to find current listings.</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #8E8E93;'>Welcome! Scan up to eight cards or search manually.</h3>", unsafe_allow_html=True)
     
-    source = st.radio("Scanner Source", ["Camera", "Gallery"], horizontal=True)
-    img_input = st.camera_input("Scanner Active") if source == "Camera" else st.file_uploader("Drop Image")
+    # 1. MANUAL TEXT SEARCH
+    search_q = st.text_input("Quick Asset Lookup", placeholder="e.g. 2000 Bowman Tom Brady #236")
+    if search_q:
+        if st.button("GET MARKET DATA"):
+            display_pricing_table(search_q)
 
-    if img_input:
-        with st.spinner("Isolating individual cards..."):
-            img_input.seek(0)
-            asset_crops = detect_cards(img_input)
-            
-            if asset_crops:
-                st.write(f"Verified {len(asset_crops)} separate assets.")
-                if st.button("AI BATCH IDENTIFY"):
-                    st.session_state['results'] = auto_label_crops(asset_crops)
+    st.divider()
+
+    # 2. IMAGE SCANNER
+    input_type = st.radio("Input Method", ["Search with Text", "Upload Image"], horizontal=True)
+
+    if input_type == "Upload Image":
+        upload_option = st.radio("Source:", ["Browse Files", "Use Camera"], horizontal=True)
         
-        if 'results' in st.session_state:
-            st.divider()
-            grid = st.columns(4)
-            for i, name in enumerate(st.session_state['results']):
-                with grid[i % 4]:
-                    st.image(cv2.cvtColor(asset_crops[i], cv2.COLOR_BGR2RGB), use_container_width=True)
-                    st.session_state['results'][i] = st.text_input(f"ID {i+1}", value=name, key=f"n_{i}")
-                    
-                    if st.button(f"CHECK MARKET {i+1}", key=f"p_{i}"):
-                        html_rows = ""
-                        for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("RAW", "Ungraded")]:
-                            val, points = fetch_market_valuation(name, gr_query)
-                            if points:
-                                list_html = "".join([f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a href='{p['url']}' target='_blank'>Link</a></div>" for p in points])
-                                html_rows += f"<tr><td style='padding:8px 0;'>{label}</td><td style='text-align:right;'><details><summary style='color:#00C805; font-weight:bold;'>${val:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{list_html}</div></details></td></tr>"
-                        st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:15px; border:1px solid #30363D;'><table style='width:100%;'>{html_rows}</table></div>", unsafe_allow_html=True)
+        if upload_option == "Use Camera":
+            img_input = st.camera_input("Scanner Active")
+        else:
+            img_input = st.file_uploader("Select an image from your device", type=['jpg','jpeg','png'])
+
+        if img_input:
+            with st.spinner("Isolating individual cards..."):
+                img_input.seek(0)
+                asset_crops = detect_cards(img_input)
+                
+                if asset_crops:
+                    st.write(f"Verified {len(asset_crops)} separate assets.")
+                    if st.button("AI BATCH IDENTIFY"):
+                        st.session_state['scan_results'] = auto_label_crops(asset_crops)
+                        st.session_state['scan_crops'] = asset_crops
+            
+            if 'scan_results' in st.session_state:
+                grid = st.columns(4)
+                for i, name in enumerate(st.session_state['scan_results']):
+                    with grid[i % 4]:
+                        st.image(cv2.cvtColor(st.session_state['scan_crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
+                        st.session_state['scan_results'][i] = st.text_input(f"Asset {i+1}", value=name, key=f"sn_{i}")
+                        if st.button(f"Analyze {i+1}", key=f"sp_{i}"):
+                            display_pricing_table(st.session_state['scan_results'][i])
 
 elif page == "Inventory": st.title("Vault")
