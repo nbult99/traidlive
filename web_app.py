@@ -45,36 +45,44 @@ footer {visibility: hidden;}
 
 # --- 3. THE UNIVERSAL SANITIZER ---
 def sanitize_card_name(raw_input):
-    """Force-cleans any dictionary artifacts out of the search string."""
     clean = str(raw_input)
-    # If it's a real dictionary, grab the 'full' key
     if isinstance(raw_input, dict):
         clean = raw_input.get('full', str(raw_input))
-    
-    # Shred dictionary syntax characters
     for artifact in ["{", "}", "'", ":", "full", "year", "brand", "player", "num"]:
         clean = clean.replace(artifact, "")
     return clean.strip()
 
-# --- 4. CORE ENGINES ---
+# --- 4. RESILIENT MARKET ENGINE ---
 def fetch_market_valuation(clean_name, grade_filter=""):
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
     try:
-        token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
+        token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, timeout=5)
         token = token_resp.json().get("access_token")
         
-        # Build search query for SOLD listings
-        search_query = f"{clean_name} {grade_filter} sold -reprint -rp"
-        if grade_filter == "Ungraded":
-            search_query = f"{clean_name} sold -PSA -BGS -SGC -CGC -graded -reprint"
+        # --- THREE-TIER SEARCH STRATEGY ---
+        # 1. Exact Name + Grade
+        # 2. Name (No #) + Grade
+        # 3. First 3 words of name + Grade
+        queries = [
+            f"{clean_name} {grade_filter} sold -reprint -rp",
+            f"{clean_name.replace('#', '')} {grade_filter} sold -reprint",
+            f"{' '.join(clean_name.split()[:3])} {grade_filter} sold"
+        ]
         
-        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(search_query)}&category_ids=212&limit=25"
-        resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"})
-        items = resp.json().get("itemSummaries", [])
-        
+        items = []
+        for q in queries:
+            if grade_filter == "Ungraded":
+                q = q.replace("Ungraded", "") + " -PSA -BGS -SGC -CGC -graded"
+            
+            ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(q)}&category_ids=212&limit=25"
+            resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}, timeout=5)
+            data = resp.json()
+            items = data.get("itemSummaries", [])
+            if items: break 
+
         if not items: return 0.0, []
         
         points = []
@@ -125,24 +133,16 @@ def detect_cards(image_file):
     return crops
 
 def display_pricing_table(raw_name):
-    # Sanitize once at the start of display
     clean_name = sanitize_card_name(raw_name)
     html_rows = ""
-    
     for label, gr_query in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("PSA 8", "PSA 8"), ("RAW", "Ungraded")]:
         val, points = fetch_market_valuation(clean_name, gr_query)
         if points:
             list_html = "".join([f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a href='{p['url']}' target='_blank' style='color:#0A84FF; text-decoration:none;'>Link</a></div>" for p in points])
-            
-            # --- FIXED ACTIVE LISTING LINK ---
-            # We encode the clean name + the grade for the active search link
-            active_search_query = f"{clean_name} {gr_query}"
-            if gr_query == "Ungraded": active_search_query = f"{clean_name} -graded"
-            
-            active_link = f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(active_search_query)}"
-            
+            active_search = f"{clean_name} {gr_query}"
+            if gr_query == "Ungraded": active_search = f"{clean_name} -graded"
+            active_link = f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(active_search)}"
             list_html += f"<div style='margin-top:10px;'><a href='{active_link}' target='_blank' style='color:#000; background:#FFF; text-decoration:none; font-weight:700; padding:8px; border-radius:5px; display:block; text-align:center;'>🔍 View Active Listings</a></div>"
-            
             html_rows += f"<tr><td style='padding:10px 0;'><strong>{label}</strong></td><td style='text-align:right;'><details><summary style='color:#00C805; font-weight:bold;'>${val:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{list_html}</div></details></td></tr>"
     
     if html_rows:
@@ -162,7 +162,7 @@ page = st.query_params.get("page", "Home")
 
 if page == "Home":
     st.title("TraidLive")
-    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.5 | Active Link Logic Fixed</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #8E8E93;'>Terminal v1.6 | Resilient Search Enabled</h3>", unsafe_allow_html=True)
     
     search_q = st.text_input("Quick Lookup", placeholder="e.g. 2000 Bowman Tom Brady 236")
     if search_q and st.button("GET MARKET DATA"):
