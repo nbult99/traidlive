@@ -5,3 +5,5 @@ pandas
 requests
 huggingface_hub
 supabase
+beautifulsoup4
+bs4
