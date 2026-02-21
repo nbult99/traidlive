@@ -13,7 +13,7 @@ HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 EBAY_APP_ID = st.secrets.get("EBAY_APP_ID", "")
-EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "") # No longer strictly needed for Finding API, but kept for compatibility
+EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "") 
 
 @st.cache_resource
 def init_connections():
@@ -25,7 +25,7 @@ supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 # --- 2. THE iOS "OBSIDIAN" DESIGN SYSTEM ---
-st.set_page_config(page_title="TraidLive | Sold Verification", layout="wide")
+st.set_page_config(page_title="TraidLive | Live Pricing", layout="wide")
 
 st.markdown("""
     <style>
@@ -49,11 +49,11 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. THE "STRICT SOLD" ENGINE (FIXED) ---
+# --- 3. LIVE MARKET ENGINE ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
     """
-    FORCED COMPLETED SEARCH: Uses the eBay Finding API specifically designed for sold items.
+    LIVE MARKET SEARCH: Uses the eBay Finding API to fetch current active listings.
     """
     app_id = EBAY_APP_ID
     if not app_id: return 0.0, []
@@ -62,25 +62,22 @@ def fetch_market_valuation(card_name, grade_filter=""):
         search_query = f"{card_name} {grade_filter}".strip()
         encoded_query = requests.utils.quote(search_query)
         
-        # The Finding API 'findCompletedItems' is the only public endpoint 
-        # that reliably filters out active listings without partner-level API access.
+        # Switched to 'findItemsByKeywords' for active inventory
         url = (
             f"https://svcs.ebay.com/services/search/FindingService/v1?"
-            f"OPERATION-NAME=findCompletedItems&"
+            f"OPERATION-NAME=findItemsByKeywords&"
             f"SERVICE-VERSION=1.13.0&"
             f"SECURITY-APPNAME={app_id}&"
             f"RESPONSE-DATA-FORMAT=JSON&"
             f"REST-PAYLOAD=true&"
             f"keywords={encoded_query}&"
-            f"categoryId=212&"
-            f"itemFilter(0).name=SoldItemsOnly&"
-            f"itemFilter(0).value=true"
+            f"categoryId=212"
         )
         
         resp = requests.get(url, timeout=10)
         data = resp.json()
         
-        finding_response = data.get("findCompletedItemsResponse", [{}])[0]
+        finding_response = data.get("findItemsByKeywordsResponse", [{}])[0]
         ack = finding_response.get("ack", [""])[0]
         
         if ack not in ["Success", "Warning"]:
@@ -92,23 +89,21 @@ def fetch_market_valuation(card_name, grade_filter=""):
         if not items: return 0.0, []
             
         points = []
-        for item in items[:5]: # Take top 5 recent sales
+        for item in items[:10]: # Take up to 10 live listings
             selling_status = item.get("sellingStatus", [{}])[0]
-            state = selling_status.get("sellingState", [""])[0]
             
-            # HARD VERIFICATION: Double-check that it actually ended with a sale
-            if state == "EndedWithSales":
-                price_str = selling_status.get("currentPrice", [{}])[0].get("__value__", "0")
-                price = float(price_str)
-                title = item.get("title", ["Unknown Card"])[0]
-                item_url = item.get("viewItemURL", ["#"])[0]
-                
-                if price > 0:
-                    points.append({
-                        "title": title,
-                        "price": price,
-                        "url": item_url
-                    })
+            # Extract current listing price
+            price_str = selling_status.get("currentPrice", [{}])[0].get("__value__", "0")
+            price = float(price_str)
+            title = item.get("title", ["Unknown Card"])[0]
+            item_url = item.get("viewItemURL", ["#"])[0]
+            
+            if price > 0:
+                points.append({
+                    "title": title,
+                    "price": price,
+                    "url": item_url
+                })
                     
         if not points: return 0.0, []
             
@@ -155,7 +150,7 @@ def detect_cards(image_file):
 # --- 5. THE PROFESSIONAL INTERFACE ---
 
 st.title("TraidLive")
-st.markdown("##### Verified Sales Auditor")
+st.markdown("##### Live Market Auditor")
 
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
@@ -188,7 +183,7 @@ if uploaded_file:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     st.session_state['suggestions'][i] = st.text_input(f"ID {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
-                    if st.button(f"Verify Sales {i+1}", key=f"v_{i}"):
+                    if st.button(f"Get Live Prices {i+1}", key=f"v_{i}"):
                         name = st.session_state['suggestions'][i]
                         
                         # Display PSA 10 and Raw Audits
@@ -197,9 +192,9 @@ if uploaded_file:
                             st.markdown(f"**{label} Avg: ${avg:,.2f}**")
                             
                             with st.container():
-                                st.markdown(f'<div class="audit-box"><div class="audit-header">{label} RECENT SALES</div>', unsafe_allow_html=True)
+                                st.markdown(f'<div class="audit-box"><div class="audit-header">{label} LIVE LISTINGS</div>', unsafe_allow_html=True)
                                 if not points:
-                                    st.write("No verified sales found.")
+                                    st.write("No active listings found.")
                                 else:
                                     for p in points:
                                         st.markdown(f'''
