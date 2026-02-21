@@ -237,6 +237,29 @@ def verify_psa_cert(cert_number):
         return False, "Not Found"
     except Exception as e:
         return False, str(e)
+# --- 6. DATABASE OPERATIONS ---
+def save_card_to_vault(user_id, card_name, psa_cert, grade, price):
+    try:
+        data = {
+            "user_id": user_id,
+            "card_name": card_name,
+            "psa_cert": psa_cert,
+            "grade": grade,
+            "last_value": price
+        }
+        supabase.table("card_vault").insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error saving card: {e}")
+        return False
+
+def get_user_vault(user_id):
+    try:
+        response = supabase.table("card_vault").select("*").execute()
+        # Thanks to RLS, this automatically only returns THIS user's cards!
+        return response.data
+    except Exception as e:
+        return []
 def detect_cards(image_file):
     image_file.seek(0) # Ensure file pointer is at the start
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
@@ -388,6 +411,19 @@ with main_col:
                                 
                                 if f"history_{i}" in st.session_state:
                                     st.info(st.session_state[f"history_{i}"])
+                            # THE NEW SAVE BUTTON
+                                if st.button("💾 Save to Vault", key=f"save_{i}"):
+                                    if st.session_state.get('logged_in'):
+                                        success = save_card_to_vault(
+                                            user_id=st.session_state['user'].id,
+                                            card_name=current_name,
+                                            psa_cert=psa_cert if psa_cert else "None",
+                                            grade="RAW",
+                                            price=val
+                                        )
+                                        if success: st.toast("✅ Asset secured in Vault!")
+                                    else:
+                                        st.warning("Please log in via the Profile tab to save cards.")
     elif page == "Trending":
         st.title("Trending Cards:")
         st.markdown("<p style='color: #8E8E93; margin-top: 20px;'>Market movement data populating soon...</p>", unsafe_allow_html=True)
@@ -395,7 +431,7 @@ with main_col:
     elif page == "Profile":
         st.title("Profile Vault")
         
-        # Initialize login state
+        # Initialize login state safely
         if 'logged_in' not in st.session_state:
             st.session_state['logged_in'] = False
 
@@ -404,42 +440,63 @@ with main_col:
             
             with login_tab:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.text_input("Username / Email", key="log_user")
-                st.text_input("Password", type="password", key="log_pass")
+                email = st.text_input("Email", key="log_user")
+                pwd = st.text_input("Password", type="password", key="log_pass")
                 if st.button("Access Vault", key="btn_login"):
-                    st.session_state['logged_in'] = True
-                    st.rerun()
+                    with st.spinner("Authenticating..."):
+                        try:
+                            # Official Supabase Login Call
+                            res = supabase.auth.sign_in_with_password({"email": email, "password": pwd})
+                            st.session_state['user'] = res.user
+                            st.session_state['logged_in'] = True
+                            st.rerun()
+                        except Exception:
+                            st.error("Invalid email or password.")
                     
             with register_tab:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.text_input("Email Address", key="reg_email")
-                st.text_input("Choose Username", key="reg_user")
-                st.text_input("Create Password", type="password", key="reg_pass")
+                new_email = st.text_input("Email Address", key="reg_email")
+                new_pwd = st.text_input("Create Password (Min 6 Characters)", type="password", key="reg_pass")
                 if st.button("Create Profile", key="btn_reg"):
-                    st.session_state['logged_in'] = True
-                    st.success("Profile Created! Welcome to TraidLive.")
-                    st.rerun()
+                    with st.spinner("Creating secure profile..."):
+                        try:
+                            res = supabase.auth.sign_up({"email": new_email, "password": new_pwd})
+                            st.success("Profile Created! Check your email for a confirmation link (if enabled) or Login.")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
         else:
-            st.success("Welcome back! You are securely logged in.")
+            st.success(f"Welcome back! Logged in as: {st.session_state['user'].email}")
             
             st.divider()
             st.markdown("### Current Inventory")
             
-            # Professional placeholder dataframe
-            st.dataframe(
-                {
-                    "Asset": ["2000 Bowman Tom Brady 236", "2024 Panini Prizm Drake Maye 301", "1989 Upper Deck Ken Griffey Jr 1"],
-                    "Grade": ["PSA 8", "RAW", "PSA 9"],
-                    "Est. Value": ["$2,450.00", "$45.00", "$185.00"],
-                    "Date Added": ["2023-10-12", "2024-01-05", "2024-02-14"]
-                },
-                hide_index=True,
-                use_container_width=True
-            )
+            # Fetch real data instead of mock data
+            user_cards = get_user_vault(st.session_state['user'].id)
+            
+            if user_cards:
+                import pandas as pd
+                df = pd.DataFrame(user_cards)
+                # Clean up the display columns
+                df = df[['card_name', 'grade', 'psa_cert', 'last_value', 'created_at']]
+                df.columns = ["Asset", "Grade", "PSA Cert", "Est. Value", "Date Added"]
+                
+                # Format the price column beautifully
+                df["Est. Value"] = df["Est. Value"].apply(lambda x: f"${float(x):,.2f}" if pd.notnull(x) else "$0.00")
+                df["Date Added"] = pd.to_datetime(df["Date Added"]).dt.strftime('%Y-%m-%d')
+                
+                st.dataframe(df, hide_index=True, use_container_width=True)
+                
+                # Calculate total vault value
+                total_val = sum(c['last_value'] for c in user_cards if c.get('last_value'))
+                st.markdown(f"<h4 style='color:#00C805;'>Total Vault Value: ${total_val:,.2f}</h4>", unsafe_allow_html=True)
+            else:
+                st.info("Your vault is currently empty. Scan some cards on the Home page to add them!")
             
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Log Out"):
+                supabase.auth.sign_out()
                 st.session_state['logged_in'] = False
+                st.session_state.pop('user', None)
                 st.rerun()
 
     elif page == "About":
