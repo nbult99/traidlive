@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import base64
 import pandas as pd
-import re # Added for strict attribute matching
+import re
 from huggingface_hub import InferenceClient
 from supabase import create_client
 
@@ -24,146 +24,151 @@ def init_connections():
 supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# --- 2. THE MARKET ANALYSIS MODULE (STRICT VERSION) ---
+# --- 2. ROBINHOOD DESIGN SYSTEM ---
+st.set_page_config(page_title="TraidLive", layout="wide", initial_sidebar_state="collapsed")
 
+st.markdown("""
+    <style>
+    .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, system-ui, sans-serif; }
+    .stButton > button { background-color: #00C805 !important; color: #000000 !important; border-radius: 24px !important; border: none !important; font-weight: 700 !important; transition: 0.2s ease; width: 100%; }
+    .stButton > button:hover { background-color: #00E606 !important; transform: translateY(-1px); }
+    .nav-container { position: fixed; right: 40px; top: 40px; z-index: 100; text-align: right; }
+    .nav-item { color: rgba(255, 255, 255, 0.4); text-decoration: none; font-size: 16px; font-weight: 600; margin-bottom: 20px; display: block; transition: 0.3s; }
+    .nav-item:hover { color: #00C805; }
+    details > summary { list-style: none; outline: none; cursor: pointer; }
+    .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #1E2124; }
+    .sold-price { color: #00C805; font-weight: 600; font-family: monospace; }
+    [data-testid="stSidebar"] { display: none; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 3. CORE ENGINES (STRICT 4-POINT) ---
 def fetch_market_valuation(card_id_data, grade_filter=""):
-    """
-    Executes targeted marketplace searches with a 4-point exact-match verification.
-    card_id_data: A dictionary containing {'year', 'brand', 'player', 'card_num'}
-    """
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
-    # Extract strict attributes
     year = str(card_id_data.get('year', '')).strip()
     brand = str(card_id_data.get('brand', '')).strip()
     player = str(card_id_data.get('player', '')).strip()
     num = str(card_id_data.get('card_num', '')).strip()
 
     try:
-        token_resp = requests.post(
-            token_url, 
-            headers={"Authorization": f"Basic {encoded_auth}", "Content-Type": "application/x-www-form-urlencoded"}, 
-            data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}
-        )
+        token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"})
         token = token_resp.json().get("access_token")
         
-        # 1. CONSTRUCT A BATTLE-HARDENED QUERY
-        # We use quotes for the player and -reprint to kill fakes immediately
         search_query = f'{year} {brand} "{player}" #{num} {grade_filter} -reprint -rp -facsimile -digital -copy sold'
-        query_encoded = requests.utils.quote(search_query)
+        if grade_filter == "Ungraded":
+            search_query = f'{year} {brand} "{player}" #{num} -PSA -BGS -SGC -CGC -graded -reprint sold'
+            
+        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(search_query)}&category_ids=212&limit=30"
+        resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"})
+        items = resp.json().get("itemSummaries", [])
         
-        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&category_ids=212&limit=30"
-        headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}
-        
-        resp = requests.get(ebay_url, headers=headers)
-        data = resp.json()
-        items = data.get("itemSummaries", [])
-        
-        if not items: return 0.0, []
-        
-        # 2. THE FOUR-POINT INSPECTION LOOP
         points = []
         for item in items:
             title = item.get('title', '').upper()
-            
-            # Strict verification criteria
-            has_year = year in title
-            has_brand = any(b.upper() in title for b in brand.split())
-            has_player = any(p.upper() in title for p in player.split())
-            
-            # Card Number match (checking for #236, 236, or No. 236 with word boundaries)
-            has_num = re.search(rf"\b{num}\b", title) is not None
-            
-            # If it passes the 4-point check, keep it
-            if has_year and has_brand and has_player and has_num:
-                if 'price' in item:
-                    points.append({
-                        "title": item.get('title'),
-                        "price": float(item['price']['value']),
-                        "url": item.get('itemWebUrl', '#')
-                    })
-            
-            if len(points) >= 10: break # Keep the top 10 most accurate
+            if year in title and any(b.upper() in title for b in brand.split()) and any(p.upper() in title for p in player.split()) and re.search(rf"\b{num}\b", title):
+                points.append({"title": item['title'], "price": float(item['price']['value']), "url": item.get('itemWebUrl', '#')})
+            if len(points) >= 10: break
                 
         if not points: return 0.0, []
-        
-        avg = sum(p['price'] for p in points) / len(points)
-        return avg, points
-    except:
-        return 0.0, []
-
-# --- 3. REFINED AI IDENTIFIER ---
+        return (sum(p['price'] for p in points) / len(points)), points
+    except: return 0.0, []
 
 def auto_label_crops(crops):
-    if not hf_client: return []
     results = []
     for crop in crops:
         try:
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
-            
-            # We now force the AI to output in a Pipe-Delimited format for easy parsing
             prompt = "Identify this sports card precisely. Return ONLY: Year | Brand | Player | Card #. Example: 2000 | Bowman | Tom Brady | 236"
-            resp = hf_client.chat_completion(
-                model=HF_MODEL, 
-                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], 
-                max_tokens=60
-            )
-            
-            raw_text = resp.choices[0].message.content.strip()
-            parts = [p.strip() for p in raw_text.split('|')]
-            
+            resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=60)
+            parts = [p.strip() for p in resp.choices[0].message.content.strip().split('|')]
             if len(parts) >= 4:
-                results.append({
-                    "full_name": f"{parts[0]} {parts[1]} {parts[2]} #{parts[3]}",
-                    "year": parts[0],
-                    "brand": parts[1],
-                    "player": parts[2],
-                    "card_num": parts[3]
-                })
-            else:
-                results.append({"full_name": "Identification Failed", "year": "", "brand": "", "player": "", "card_num": ""})
-        except: 
-            results.append({"full_name": "Vision Error", "year": "", "brand": "", "player": "", "card_num": ""})
+                results.append({"full_name": f"{parts[0]} {parts[1]} {parts[2]} #{parts[3]}", "year": parts[0], "brand": parts[1], "player": parts[2], "card_num": parts[3]})
+            else: results.append({"full_name": "Failed", "year": "", "brand": "", "player": "", "card_num": ""})
+        except: results.append({"full_name": "Error", "year": "", "brand": "", "player": "", "card_num": ""})
     return results
 
-# --- 4. TERMINAL UI (UPDATED TO HANDLE DICT RESULTS) ---
+def detect_cards(image_file):
+    file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+    ratio = 1200.0 / img.shape[0]
+    img_work = cv2.resize(img, (int(img.shape[1] * ratio), 1200))
+    gray = cv2.cvtColor(img_work, cv2.COLOR_BGR2GRAY)
+    edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 30, 150)
+    dilated = cv2.dilate(edged, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=2)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    crops = []
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:8]:
+        if cv2.contourArea(cnt) > 20000:
+            x, y, w, h = cv2.boundingRect(cnt)
+            pad = 10
+            y1, y2 = max(0, y-pad), min(img_work.shape[0], y+h+pad)
+            x1, x2 = max(0, x-pad), min(img_work.shape[1], x+w+pad)
+            crops.append(img_work[y1:y2, x1:x2])
+    return crops
 
-# [Design / Navigation code remains the same as your stable build...]
+# --- 4. TERMINAL NAVIGATION & ROUTING ---
+page = st.query_params.get("page", "Home")
+
+st.markdown("""<div class="nav-container">
+    <a class="nav-item" href="/?page=Home">Home</a>
+    <a class="nav-item" href="/?page=Inventory">Inventory</a>
+    <a class="nav-item" href="/?page=Search">Search</a>
+    <a class="nav-item" href="/?page=Profile">Profile</a>
+</div>""", unsafe_allow_html=True)
 
 if page == "Home":
     st.title("TraidLive")
-    # ... Scanner logic ...
+    st.markdown("<h3 style='color: #8E8E93;'>Welcome! Scan up to eight cards with one photo to find current listings.</h3>", unsafe_allow_html=True)
+    
+    # Text Search Block
+    search_input = st.text_input("Quick Lookup", placeholder="e.g. 2000 Bowman Tom Brady #236")
+    if search_input and st.button("SEARCH MANUALLY"):
+        p = search_input.replace('#', '').split()
+        if len(p) >= 4:
+            s_data = {"year": p[0], "brand": p[1], "player": ' '.join(p[2:-1]), "card_num": p[-1]}
+            html_r = ""
+            for l, g in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("RAW", "Ungraded")]:
+                v, pts = fetch_market_valuation(s_data, g)
+                if pts:
+                    l_html = "".join([f"<div class='sold-row'><span class='sold-title'>{x['title']}</span><span class='sold-price'>${x['price']:,.2f}</span><a href='{x['url']}' target='_blank' style='color:#0A84FF;'>Sold</a></div>" for x in pts])
+                    html_r += f"<tr style='border-bottom: 1px solid #2C2C2E;'><td style='padding: 10px 5px;'><strong>{l}</strong></td><td style='padding: 10px 5px; text-align: right;'><details><summary style='color:#00C805; font-weight:700;'>${v:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{l_html}</div></details></td></tr>"
+            st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:10px; border:1px solid #30363D; margin-top:10px;'><table style='width:100%; border-collapse:collapse;'>{html_r}</table></div>", unsafe_allow_html=True)
+
+    st.divider()
+    
+    # Image Scanner Block
+    source = st.radio("Scanner Source", ["Camera", "Gallery"], horizontal=True)
+    img_input = st.camera_input("Scanner Active") if source == "Camera" else st.file_uploader("Drop Image")
+
     if img_input:
-        with st.spinner("Analyzing Assets..."):
+        with st.spinner("Processing..."):
             img_input.seek(0)
             asset_crops = detect_cards(img_input)
-            if st.button("AI BATCH IDENTIFY"):
-                # Store the full dictionaries in session state
-                st.session_state['scan_data'] = auto_label_crops(asset_crops)
+            if asset_crops and st.button("AI BATCH IDENTIFY"):
+                st.session_state['results'] = auto_label_crops(asset_crops)
+                st.session_state['crops'] = asset_crops
         
-        if 'scan_data' in st.session_state:
-            st.divider()
+        if 'results' in st.session_state:
             grid = st.columns(4)
-            for i, card_dict in enumerate(st.session_state['scan_data']):
+            for i, data in enumerate(st.session_state['results']):
                 with grid[i % 4]:
-                    st.image(cv2.cvtColor(asset_crops[i], cv2.COLOR_BGR2RGB), use_container_width=True)
-                    
-                    # Allow user to edit the full identity string
-                    display_name = st.text_input(f"Asset {i+1}", value=card_dict['full_name'], key=f"n_{i}")
-                    
+                    st.image(cv2.cvtColor(st.session_state['crops'][i], cv2.COLOR_BGR2RGB), use_container_width=True)
+                    display_name = st.text_input(f"ID {i+1}", value=data['full_name'], key=f"n_{i}")
                     if st.button(f"CHECK MARKET {i+1}", key=f"p_{i}"):
-                        # Re-parse if the user edited the text box manually
-                        parts = [p.strip() for p in display_name.replace('#', '').split()]
-                        # Fallback to dict if parse fails
-                        search_data = card_dict if len(parts) < 4 else {
-                            "year": parts[0], "brand": parts[1], "player": ' '.join(parts[2:-1]), "card_num": parts[-1]
-                        }
+                        p = display_name.replace('#', '').split()
+                        s_data = data if len(p) < 4 else {"year": p[0], "brand": p[1], "player": ' '.join(p[2:-1]), "card_num": p[-1]}
+                        html_r = ""
+                        for l, g in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("RAW", "Ungraded")]:
+                            v, pts = fetch_market_valuation(s_data, g)
+                            if pts:
+                                l_html = "".join([f"<div class='sold-row'><span class='sold-title'>{x['title']}</span><span class='sold-price'>${x['price']:,.2f}</span><a href='{x['url']}' target='_blank' style='color:#0A84FF;'>Sold</a></div>" for x in pts])
+                                html_r += f"<tr style='border-bottom: 1px solid #2C2C2E;'><td style='padding: 10px 5px;'><strong>{l}</strong></td><td style='padding: 10px 5px; text-align: right;'><details><summary style='color:#00C805; font-weight:700;'>${v:,.2f} ▼</summary><div style='background:#151516; padding:10px; border-radius:8px; border:1px solid #3A3A3C; text-align:left; margin-top:10px;'>{l_html}</div></details></td></tr>"
+                        st.markdown(f"<div style='background:#1E2124; border-radius:12px; padding:10px; border:1px solid #30363D; margin-top:10px;'><table style='width:100%; border-collapse:collapse;'>{html_r}</table></div>", unsafe_allow_html=True)
 
-                        with st.spinner("Executing 4-Point Inspection..."):
-                            html_rows = ""
-                            for label, query_filter in [("PSA 10", "PSA 10"), ("PSA 9", "PSA 9"), ("RAW", "Ungraded")]:
-                                avg, points = fetch_market_valuation(search_data, query_filter)
-                                # ... Table HTML generation logic remains same as stable build ...
+elif page == "Inventory": st.title("Vault")
