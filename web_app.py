@@ -6,14 +6,13 @@ import base64
 import pandas as pd
 from huggingface_hub import InferenceClient
 from supabase import create_client
-from datetime import datetime, timedelta
 
 # --- 1. INITIALIZATION ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 EBAY_APP_ID = st.secrets.get("EBAY_APP_ID", "")
-EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "") 
+EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "")
 
 @st.cache_resource
 def init_connections():
@@ -24,101 +23,39 @@ def init_connections():
 supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# --- 2. THE iOS "OBSIDIAN" DESIGN SYSTEM ---
-st.set_page_config(page_title="TraidLive | Live Pricing", layout="wide")
-
-st.markdown("""
-    <style>
-    .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, sans-serif; }
-    div[data-testid="stMetric"] { background: rgba(28, 28, 30, 0.8); border-radius: 18px; padding: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
-    .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 14px; border: none; padding: 12px; font-weight: 600; width: 100%; }
-    
-    /* Audit Box Styling */
-    .audit-box { 
-        background: #1C1C1E; 
-        border: 1px solid #3A3A3C; 
-        border-radius: 12px; 
-        padding: 15px; 
-        margin-top: 10px; 
-        font-size: 13px;
-    }
-    .audit-header { color: #8E8E93; font-size: 11px; text-transform: uppercase; margin-bottom: 10px; letter-spacing: 0.5px; }
-    .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2C2C2E; }
-    .sold-price { color: #34C759; font-weight: 700; }
-    .sold-link { color: #0A84FF; text-decoration: none; font-weight: 500; font-size: 14px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 3. LIVE MARKET ENGINE (FIXED) ---
-
+# --- 2. MARKET ANALYSIS MODULES ---
 def fetch_market_valuation(card_name, grade_filter=""):
     """
-    LIVE MARKET SEARCH: Uses the eBay Finding API to fetch current active listings.
+    Executes targeted marketplace searches.
+    grade_filter: "PSA 10" or "Ungraded"
     """
-    app_id = EBAY_APP_ID
-    if not app_id: return 0.0, []
-    
+    token_url = "https://api.ebay.com/identity/v1/oauth2/token"
+    auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
+    encoded_auth = base64.b64encode(auth_str.encode()).decode()
     try:
-        # If searching for Raw, don't use the word "Ungraded" because sellers don't use it
-        if grade_filter == "Ungraded":
-            search_query = card_name.strip()
-        else:
-            search_query = f"{card_name} {grade_filter}".strip()
-            
-        encoded_query = requests.utils.quote(search_query)
-        
-        # Switched to 'findItemsByKeywords' for active inventory. 
-        # Removed categoryId=212 so it finds TCG cards as well as Sports.
-        url = (
-            f"https://svcs.ebay.com/services/search/FindingService/v1?"
-            f"OPERATION-NAME=findItemsByKeywords&"
-            f"SERVICE-VERSION=1.13.0&"
-            f"SECURITY-APPNAME={app_id}&"
-            f"RESPONSE-DATA-FORMAT=JSON&"
-            f"REST-PAYLOAD=true&"
-            f"keywords={encoded_query}"
+        token_resp = requests.post(
+            token_url, 
+            headers={"Authorization": f"Basic {encoded_auth}", "Content-Type": "application/x-www-form-urlencoded"}, 
+            data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}
         )
+        token = token_resp.json().get("access_token")
         
-        resp = requests.get(url, timeout=10)
+        # Searching specifically for SOLD listings with the grade filter
+        search_query = f"{card_name} {grade_filter} sold"
+        query_encoded = requests.utils.quote(search_query)
+        
+        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&category_ids=212&limit=5"
+        headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}
+        
+        resp = requests.get(ebay_url, headers=headers)
         data = resp.json()
+        items = data.get("itemSummaries", [])
         
-        finding_response = data.get("findItemsByKeywordsResponse", [{}])[0]
-        ack = finding_response.get("ack", [""])[0]
-        
-        if ack not in ["Success", "Warning"]:
-            return 0.0, []
-            
-        search_result = finding_response.get("searchResult", [{}])[0]
-        items = search_result.get("item", [])
-        
-        if not items: return 0.0, []
-            
-        points = []
-        for item in items[:10]: # Take up to 10 live listings
-            selling_status = item.get("sellingStatus", [{}])[0]
-            
-            # Extract current active listing price
-            price_str = selling_status.get("currentPrice", [{}])[0].get("__value__", "0")
-            price = float(price_str)
-            title = item.get("title", ["Unknown Card"])[0]
-            item_url = item.get("viewItemURL", ["#"])[0]
-            
-            if price > 0:
-                points.append({
-                    "title": title,
-                    "price": price,
-                    "url": item_url
-                })
-                    
-        if not points: return 0.0, []
-            
-        avg = sum(p['price'] for p in points) / len(points)
-        return avg, points
-        
-    except Exception as e:
-        return 0.0, []
-
-# --- 4. ORIGINAL LOGIC (RESTORED) ---
+        if not items: return 0.0
+        prices = [float(item['price']['value']) for item in items if 'price' in item]
+        return sum(prices) / len(prices)
+    except:
+        return 0.0
 
 def auto_label_crops(crops):
     if not hf_client: return ["" for _ in crops]
@@ -127,7 +64,8 @@ def auto_label_crops(crops):
         try:
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
-            resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": "Identify this card. Return ONLY: Year, Brand, Player, Card #."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
+            prompt = "Identify this card. Return ONLY: Year, Brand, Player, Card #. No prose."
+            resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
             labels.append(resp.choices[0].message.content.strip())
         except: labels.append("")
     return labels
@@ -152,71 +90,115 @@ def detect_cards(image_file):
             crops.append(img[y:y+h, x:x+w])
     return crops
 
-# --- 5. THE PROFESSIONAL INTERFACE ---
+# --- 3. THE DARK MODE INTERFACE ---
+
+st.set_page_config(page_title="TraidLive | Digital Assets", layout="wide")
+
+# iOS Dark Mode CSS Injection
+st.markdown("""
+    <style>
+    /* Dark background */
+    .stApp {
+        background-color: #000000;
+        color: #FFFFFF;
+    }
+    /* Rounded Card Style for text inputs */
+    div.stTextInput > div > div > input {
+        background-color: #1C1C1E;
+        color: white;
+        border: 1px solid #3A3A3C;
+        border-radius: 10px;
+    }
+    /* iOS Style Buttons */
+    .stButton > button {
+        background-color: #0A84FF; /* iOS System Blue */
+        color: white;
+        border-radius: 12px;
+        border: none;
+        padding: 10px 24px;
+        font-weight: 600;
+        transition: all 0.2s ease;
+    }
+    .stButton > button:hover {
+        background-color: #409CFF;
+        color: white;
+        transform: scale(1.02);
+    }
+    /* Dataframe styling */
+    .stDataFrame {
+        background-color: #1C1C1E;
+        border-radius: 15px;
+    }
+    /* Header fonts */
+    h1, h2, h3 {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+    }
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background-color: #1C1C1E;
+        border-right: 1px solid #3A3A3C;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 st.title("TraidLive")
-st.markdown("##### Live Market Auditor")
+st.write("Market Intelligence Dashboard")
 
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
-source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
 
-uploaded_file = st.camera_input("Snap") if source == "Camera" else st.file_uploader("", type=['jpg','jpeg','png'])
+uploaded_file = st.file_uploader("Upload Collection Image", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("Analyzing Assets..."):
+    with st.spinner("Analyzing image..."):
         uploaded_file.seek(0)
         asset_crops = detect_cards(uploaded_file)
     
     if asset_crops:
-        col_ai, col_commit = st.columns(2)
+        st.info(f"{len(asset_crops)} assets detected in frame.")
+        
+        col_ai, col_commit_all = st.columns(2)
+        
         with col_ai:
-            if st.button("AI Batch ID"):
-                st.session_state['suggestions'] = auto_label_crops(asset_crops)
-        with col_commit:
-            if 'suggestions' in st.session_state and st.button("Commit All to Database"):
-                for name in st.session_state['suggestions']:
-                    p_psa, _ = fetch_market_valuation(name, "PSA 10")
-                    p_raw, _ = fetch_market_valuation(name, "Ungraded")
-                    supabase.table("inventory").insert({"card_name": name, "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
-                st.toast("Sync Complete.")
+            if st.button("AI Batch Identification"):
+                with st.spinner("Processing..."):
+                    st.session_state['suggestions'] = auto_label_crops(asset_crops)
+
+        with col_commit_all:
+            if 'suggestions' in st.session_state:
+                if st.button("Commit All to Inventory"):
+                    with st.spinner("Synchronizing..."):
+                        for i, name in enumerate(st.session_state['suggestions']):
+                            psa_val = fetch_market_valuation(name, "PSA 10")
+                            raw_val = fetch_market_valuation(name, "Ungraded")
+                            supabase.table("inventory").insert({"card_name": name, "psa_10_price": psa_val, "ungraded_price": raw_val, "owner": owner_id}).execute()
+                        st.success("Batch successfully committed.")
 
         if 'suggestions' in st.session_state:
             st.divider()
-            grid = st.columns(4)
+            cols = st.columns(4)
             for i, crop in enumerate(asset_crops):
-                with grid[i % 4]:
+                with cols[i % 4]:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
-                    st.session_state['suggestions'][i] = st.text_input(f"ID {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
-                    
-                    if st.button(f"Get Live Prices {i+1}", key=f"v_{i}"):
-                        name = st.session_state['suggestions'][i]
-                        
-                        # Display PSA 10 and Raw Audits
-                        for label, grade in [("PSA 10", "PSA 10"), ("RAW", "Ungraded")]:
-                            avg, points = fetch_market_valuation(name, grade)
-                            st.markdown(f"**{label} Avg: ${avg:,.2f}**")
-                            
-                            with st.container():
-                                st.markdown(f'<div class="audit-box"><div class="audit-header">{label} LIVE LISTINGS</div>', unsafe_allow_html=True)
-                                if not points:
-                                    st.write("No active listings found.")
-                                else:
-                                    for p in points:
-                                        st.markdown(f'''
-                                        <div class="sold-row">
-                                            <span style="flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-right: 10px;">{p['title']}</span>
-                                            <span class="sold-price">${p['price']:,.2f}</span>
-                                            <a class="sold-link" href="{p['url']}" target="_blank" style="margin-left: 10px;">🔗</a>
-                                        </div>
-                                        ''', unsafe_allow_html=True)
-                                st.markdown('</div>', unsafe_allow_html=True)
+                    st.session_state['suggestions'][i] = st.text_input(f"Asset {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
+    else:
+        st.warning("No card contours detected.")
 
-# Ledger View
+# --- 4. INVENTORY RECORD ---
 st.divider()
-if st.button("Refresh Inventory Vault"):
+st.subheader("Inventory Ledger")
+if st.button("Refresh Database"):
     try:
-        res = supabase.table("inventory").select("*").eq("owner", owner_id).order("created_at", desc=True).execute()
-        if res.data:
-            df = pd.DataFrame(res.data)
-            st.dataframe(df[['card_name', 'ungraded_price', 'psa_10_price']], use_container_width=True)
-    except Exception as e: st.error(f"Sync failed: {e}")
+        response = supabase.table("inventory").select("*").eq("owner", owner_id).order("created_at", desc=True).execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            cols_to_show = ['card_name', 'ungraded_price', 'psa_10_price', 'created_at']
+            available_cols = [c for c in cols_to_show if c in df.columns]
+            df_display = df[available_cols]
+            df_display.columns = ['Asset Name', 'Ungraded Val', 'PSA 10 Val', 'Sync Date']
+            st.dataframe(df_display, use_container_width=True)
+        else:
+            st.info("No records found.")
+    except Exception as e:
+        st.error(f"Query failed: {str(e)}")
