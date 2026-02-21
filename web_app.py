@@ -1,20 +1,19 @@
 import streamlit as st
 import cv2
 import numpy as np
+import requests
 import base64
 import pandas as pd
-import requests as standard_requests 
 from huggingface_hub import InferenceClient
 from supabase import create_client
-import urllib.parse
-from bs4 import BeautifulSoup
-import cloudscraper
+from datetime import datetime, timedelta
 
-# --- 1. INITIALIZATION & SECURE CONNECTIVITY ---
+# --- 1. INITIALIZATION ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
-PSA_TOKEN = st.secrets.get("PSA_TOKEN", "")
+EBAY_APP_ID = st.secrets.get("EBAY_APP_ID", "")
+EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "") # No longer strictly needed for Finding API, but kept for compatibility
 
 @st.cache_resource
 def init_connections():
@@ -26,17 +25,23 @@ supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 # --- 2. THE iOS "OBSIDIAN" DESIGN SYSTEM ---
-st.set_page_config(page_title="TraidLive | Market Auditor", layout="wide")
+st.set_page_config(page_title="TraidLive | Sold Verification", layout="wide")
 
 st.markdown("""
     <style>
     .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, sans-serif; }
-    [data-testid="stMetricValue"] { font-size: 28px; font-weight: 700; color: #FFFFFF; }
     div[data-testid="stMetric"] { background: rgba(28, 28, 30, 0.8); border-radius: 18px; padding: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
-    .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 12px; border: none; padding: 12px; font-weight: 600; width: 100%; }
+    .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 14px; border: none; padding: 12px; font-weight: 600; width: 100%; }
     
     /* Audit Box Styling */
-    .audit-box { background: #1C1C1E; border: 1px solid #3A3A3C; border-radius: 12px; padding: 15px; margin-top: 10px; font-size: 13px; }
+    .audit-box { 
+        background: #1C1C1E; 
+        border: 1px solid #3A3A3C; 
+        border-radius: 12px; 
+        padding: 15px; 
+        margin-top: 10px; 
+        font-size: 13px;
+    }
     .audit-header { color: #8E8E93; font-size: 11px; text-transform: uppercase; margin-bottom: 10px; letter-spacing: 0.5px; }
     .sold-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2C2C2E; }
     .sold-price { color: #34C759; font-weight: 700; }
@@ -44,63 +49,76 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. MARKET PRICING SCRAPER (ACTIVE LISTINGS) ---
+# --- 3. THE "STRICT SOLD" ENGINE (FIXED) ---
+
 def fetch_market_valuation(card_name, grade_filter=""):
+    """
+    FORCED COMPLETED SEARCH: Uses the eBay Finding API specifically designed for sold items.
+    """
+    app_id = EBAY_APP_ID
+    if not app_id: return 0.0, []
+    
     try:
-        # Strip out the verification badges so it doesn't mess up the eBay search keywords
-        clean_name = card_name.replace("✅ [PSA VERIFIED]", "").replace("❌ [Not PSA verified]", "").strip()
-        search_query = f"{clean_name} {grade_filter}".strip()
-        encoded_query = urllib.parse.quote(search_query)
+        search_query = f"{card_name} {grade_filter}".strip()
+        encoded_query = requests.utils.quote(search_query)
         
-        # Default to active listings
-        url = f"https://www.ebay.com/sch/i.html?_nkw={encoded_query}"
-        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
-        resp = scraper.get(url, timeout=15)
-        soup = BeautifulSoup(resp.text, 'html.parser')
+        # The Finding API 'findCompletedItems' is the only public endpoint 
+        # that reliably filters out active listings without partner-level API access.
+        url = (
+            f"https://svcs.ebay.com/services/search/FindingService/v1?"
+            f"OPERATION-NAME=findCompletedItems&"
+            f"SERVICE-VERSION=1.13.0&"
+            f"SECURITY-APPNAME={app_id}&"
+            f"RESPONSE-DATA-FORMAT=JSON&"
+            f"REST-PAYLOAD=true&"
+            f"keywords={encoded_query}&"
+            f"categoryId=212&"
+            f"itemFilter(0).name=SoldItemsOnly&"
+            f"itemFilter(0).value=true"
+        )
         
-        items = soup.find_all('div', class_='s-item__info')
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        
+        finding_response = data.get("findCompletedItemsResponse", [{}])[0]
+        ack = finding_response.get("ack", [""])[0]
+        
+        if ack not in ["Success", "Warning"]:
+            return 0.0, []
+            
+        search_result = finding_response.get("searchResult", [{}])[0]
+        items = search_result.get("item", [])
+        
+        if not items: return 0.0, []
+            
         points = []
-        for item in items:
-            title_tag = item.find('div', class_='s-item__title')
-            if not title_tag or "Shop on eBay" in title_tag.text: continue
-            price_tag = item.find('span', class_='s-item__price')
-            if not price_tag: continue
-            price_text = price_tag.text.replace('$', '').replace(',', '').strip()
-            if 'to' in price_text.lower(): continue
-            try: clean_price = float(''.join(c for c in price_text if c.isdigit() or c == '.'))
-            except: continue
-            link_tag = item.find('a', class_='s-item__link')
-            item_url = link_tag['href'] if link_tag else "#"
-            clean_url = item_url.split('?')[0] if '?' in item_url else item_url
+        for item in items[:5]: # Take top 5 recent sales
+            selling_status = item.get("sellingStatus", [{}])[0]
+            state = selling_status.get("sellingState", [""])[0]
             
-            points.append({"title": title_tag.text.replace("NEW LISTING", "").strip(), "price": clean_price, "url": clean_url})
-            
-            # Increase data points to 10
-            if len(points) >= 10: break
+            # HARD VERIFICATION: Double-check that it actually ended with a sale
+            if state == "EndedWithSales":
+                price_str = selling_status.get("currentPrice", [{}])[0].get("__value__", "0")
+                price = float(price_str)
+                title = item.get("title", ["Unknown Card"])[0]
+                item_url = item.get("viewItemURL", ["#"])[0]
                 
+                if price > 0:
+                    points.append({
+                        "title": title,
+                        "price": price,
+                        "url": item_url
+                    })
+                    
         if not points: return 0.0, []
+            
         avg = sum(p['price'] for p in points) / len(points)
         return avg, points
+        
     except Exception as e:
         return 0.0, []
 
-# --- 4. CORE VISION & PSA VERIFICATION LOGIC ---
-def verify_psa_cert(cert_number):
-    """Hits the official PSA API to verify if the cert number is valid."""
-    if not PSA_TOKEN or not cert_number.isdigit():
-        return False
-        
-    url = f"https://api.psacard.com/publicapi/cert/GetByCertNumber/{cert_number}"
-    headers = {"Authorization": f"bearer {PSA_TOKEN}"}
-    
-    try:
-        resp = standard_requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("PSACert", {}).get("CertNumber") is not None
-        return False
-    except:
-        return False
+# --- 4. ORIGINAL LOGIC (RESTORED) ---
 
 def auto_label_crops(crops):
     if not hf_client: return ["" for _ in crops]
@@ -109,32 +127,9 @@ def auto_label_crops(crops):
         try:
             _, buf = cv2.imencode(".jpg", crop)
             b64 = base64.b64encode(buf.tobytes()).decode()
-            
-            # Original name extraction + hidden cert extraction
-            prompt = "Identify this card. First line: Year, Brand, Player, Card #. Second line: If it is a graded PSA slab, output the 7 or 8 digit numeric certification number. If not, output 'NONE'."
-            resp = hf_client.chat_completion(
-                model=HF_MODEL, 
-                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], 
-                max_tokens=60
-            )
-            
-            result = resp.choices[0].message.content.strip().split('\n')
-            card_name = result[0].strip()
-            
-            cert_num = ""
-            if len(result) > 1:
-                cert_num = ''.join(filter(str.isdigit, result[1]))
-            
-            # Apply the badge based on API ping
-            if cert_num and len(cert_num) >= 7:
-                if verify_psa_cert(cert_num):
-                    labels.append(f"{card_name} ✅ [PSA VERIFIED]")
-                else:
-                    labels.append(f"{card_name} ❌ [Not PSA verified]")
-            else:
-                labels.append(f"{card_name} ❌ [Not PSA verified]")
-                
-        except: labels.append("Vision Error")
+            resp = hf_client.chat_completion(model=HF_MODEL, messages=[{"role": "user", "content": [{"type": "text", "text": "Identify this card. Return ONLY: Year, Brand, Player, Card #."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}], max_tokens=50)
+            labels.append(resp.choices[0].message.content.strip())
+        except: labels.append("")
     return labels
 
 def detect_cards(image_file):
@@ -158,32 +153,14 @@ def detect_cards(image_file):
     return crops
 
 # --- 5. THE PROFESSIONAL INTERFACE ---
+
 st.title("TraidLive")
-st.markdown("##### AI Portfolio Manager")
+st.markdown("##### Verified Sales Auditor")
 
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
-
-# LIVE PORTFOLIO CALCULATOR
-try:
-    vault_res = supabase.table("inventory").select("ungraded_price, psa_10_price").eq("owner", owner_id).execute()
-    if vault_res.data:
-        df_port = pd.DataFrame(vault_res.data)
-        total_raw = df_port['ungraded_price'].sum()
-        total_psa = df_port['psa_10_price'].sum()
-        asset_count = len(df_port)
-    else:
-        total_raw, total_psa, asset_count = 0.0, 0.0, 0
-except Exception:
-    total_raw, total_psa, asset_count = 0.0, 0.0, 0
-
-k1, k2, k3 = st.columns(3)
-k1.metric("Raw Portfolio Value", f"${total_raw:,.2f}")
-k2.metric("PSA 10 Potential", f"${total_psa:,.2f}")
-k3.metric("Assets in Vault", asset_count)
-st.divider()
-
 source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
-uploaded_file = st.camera_input("Snap Card") if source == "Camera" else st.file_uploader("", type=['jpg','jpeg','png'])
+
+uploaded_file = st.camera_input("Snap") if source == "Camera" else st.file_uploader("", type=['jpg','jpeg','png'])
 
 if uploaded_file:
     with st.spinner("Analyzing Assets..."):
@@ -198,13 +175,10 @@ if uploaded_file:
         with col_commit:
             if 'suggestions' in st.session_state and st.button("Commit All to Database"):
                 for name in st.session_state['suggestions']:
-                    # Clean the badges off before saving to the database
-                    db_name = name.replace("✅ [PSA VERIFIED]", "").replace("❌ [Not PSA verified]", "").strip()
-                    p_psa, _ = fetch_market_valuation(db_name, "PSA 10")
-                    p_raw, _ = fetch_market_valuation(db_name, "Ungraded")
-                    supabase.table("inventory").insert({"card_name": db_name, "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
+                    p_psa, _ = fetch_market_valuation(name, "PSA 10")
+                    p_raw, _ = fetch_market_valuation(name, "Ungraded")
+                    supabase.table("inventory").insert({"card_name": name, "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
                 st.toast("Sync Complete.")
-                st.rerun() 
 
         if 'suggestions' in st.session_state:
             st.divider()
@@ -214,16 +188,18 @@ if uploaded_file:
                     st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     st.session_state['suggestions'][i] = st.text_input(f"ID {i+1}", value=st.session_state['suggestions'][i], key=f"inp_{i}")
                     
-                    if st.button(f"Get Live Prices {i+1}", key=f"v_{i}"):
+                    if st.button(f"Verify Sales {i+1}", key=f"v_{i}"):
                         name = st.session_state['suggestions'][i]
+                        
+                        # Display PSA 10 and Raw Audits
                         for label, grade in [("PSA 10", "PSA 10"), ("RAW", "Ungraded")]:
                             avg, points = fetch_market_valuation(name, grade)
                             st.markdown(f"**{label} Avg: ${avg:,.2f}**")
                             
                             with st.container():
-                                st.markdown(f'<div class="audit-box"><div class="audit-header">{label} ACTIVE LISTINGS</div>', unsafe_allow_html=True)
+                                st.markdown(f'<div class="audit-box"><div class="audit-header">{label} RECENT SALES</div>', unsafe_allow_html=True)
                                 if not points:
-                                    st.write("No active listings found.")
+                                    st.write("No verified sales found.")
                                 else:
                                     for p in points:
                                         st.markdown(f'''
@@ -235,6 +211,7 @@ if uploaded_file:
                                         ''', unsafe_allow_html=True)
                                 st.markdown('</div>', unsafe_allow_html=True)
 
+# Ledger View
 st.divider()
 if st.button("Refresh Inventory Vault"):
     try:
