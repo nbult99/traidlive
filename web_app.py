@@ -1,21 +1,18 @@
 import streamlit as st
 import cv2
 import numpy as np
-import requests
 import base64
 import pandas as pd
 from huggingface_hub import InferenceClient
 from supabase import create_client
-from datetime import datetime, timedelta
 import urllib.parse
 from bs4 import BeautifulSoup
+from curl_cffi import requests # Anti-bot requests library
 
 # --- 1. INITIALIZATION & SECURE CONNECTIVITY ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
-EBAY_APP_ID = st.secrets.get("EBAY_APP_ID", "")
-EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "")
 
 @st.cache_resource
 def init_connections():
@@ -27,11 +24,12 @@ supabase, hf_client = init_connections()
 HF_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 # --- 2. THE iOS "OBSIDIAN" DESIGN SYSTEM ---
-st.set_page_config(page_title="TraidLive | Sold Verification", layout="wide")
+st.set_page_config(page_title="TraidLive | Dashboard", layout="wide")
 
 st.markdown("""
     <style>
     .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, sans-serif; }
+    [data-testid="stMetricValue"] { font-size: 28px; font-weight: 700; color: #FFFFFF; }
     div[data-testid="stMetric"] { background: rgba(28, 28, 30, 0.8); border-radius: 18px; padding: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
     .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 12px; border: none; padding: 12px; font-weight: 600; width: 100%; }
     
@@ -51,35 +49,26 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. THE "BYPASS" SCRAPER ENGINE ---
+# --- 3. THE "GHOST" SCRAPER ENGINE ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
     """
-    Bypasses the eBay API and scrapes the consumer website directly for sold items.
-    Uses eBay's internal LH_Sold=1 and LH_Complete=1 URL parameters.
+    Bypasses eBay CAPTCHAs using curl_cffi to scrape verified completed sales natively.
     """
     try:
         search_query = f"{card_name} {grade_filter}".strip()
         encoded_query = urllib.parse.quote(search_query)
         
-        # The exact URL you get when you click "Sold Items" on eBay.com
         url = f"https://www.ebay.com/sch/i.html?_nkw={encoded_query}&LH_Sold=1&LH_Complete=1"
         
-        # Spoofing a modern browser to prevent eBay from blocking the request
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-        }
-        
-        resp = requests.get(url, headers=headers, timeout=10)
+        # Impersonate a real Chrome 110 browser
+        resp = requests.get(url, impersonate="chrome110", timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
         
         items = soup.find_all('div', class_='s-item__info')
         
         points = []
         for item in items:
-            # eBay puts a hidden dummy item at the top of every list, we skip it
             title_tag = item.find('div', class_='s-item__title')
             if not title_tag or "Shop on eBay" in title_tag.text: 
                 continue
@@ -121,7 +110,7 @@ def fetch_market_valuation(card_name, grade_filter=""):
         print(f"Scraper Error: {e}")
         return 0.0, []
 
-# --- 4. CORE VISION LOGIC (UNTOUCHED) ---
+# --- 4. CORE VISION LOGIC ---
 
 def auto_label_crops(crops):
     if not hf_client: return ["" for _ in crops]
@@ -158,9 +147,31 @@ def detect_cards(image_file):
 # --- 5. THE PROFESSIONAL INTERFACE ---
 
 st.title("TraidLive")
-st.markdown("##### Verified Sales Auditor")
+st.markdown("##### Verified Portfolio Dashboard")
 
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
+
+# --- NEW: LIVE PORTFOLIO CALCULATOR ---
+try:
+    vault_res = supabase.table("inventory").select("ungraded_price, psa_10_price").eq("owner", owner_id).execute()
+    if vault_res.data:
+        df_port = pd.DataFrame(vault_res.data)
+        total_raw = df_port['ungraded_price'].sum()
+        total_psa = df_port['psa_10_price'].sum()
+        asset_count = len(df_port)
+    else:
+        total_raw, total_psa, asset_count = 0.0, 0.0, 0
+except Exception:
+    total_raw, total_psa, asset_count = 0.0, 0.0, 0
+
+# Render KPI Cards
+k1, k2, k3 = st.columns(3)
+k1.metric("Raw Portfolio Value", f"${total_raw:,.2f}")
+k2.metric("PSA 10 Potential", f"${total_psa:,.2f}")
+k3.metric("Assets in Vault", asset_count)
+st.divider()
+# ----------------------------------------
+
 source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
 
 uploaded_file = st.camera_input("Snap") if source == "Camera" else st.file_uploader("", type=['jpg','jpeg','png'])
@@ -182,6 +193,7 @@ if uploaded_file:
                     p_raw, _ = fetch_market_valuation(name, "Ungraded")
                     supabase.table("inventory").insert({"card_name": name, "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
                 st.toast("Sync Complete.")
+                st.rerun() # Refresh the page so the KPI cards update instantly
 
         if 'suggestions' in st.session_state:
             st.divider()
