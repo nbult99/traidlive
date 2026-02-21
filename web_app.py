@@ -58,52 +58,63 @@ def fetch_market_valuation(clean_name, grade_filter=""):
     auth_str = f"{EBAY_APP_ID}:{EBAY_CERT_ID}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     
+    # Extract strict match criteria from the name (Year, Number, Player)
+    year_match = re.search(r'\b(19|20)\d{2}\b', clean_name)
+    target_year = year_match.group(0) if year_match else ""
+    
+    # Find the card number (assuming it's the last digits or specifically marked)
+    num_match = re.search(r'\b\d{1,4}[A-Z]?\b$', clean_name.strip())
+    target_num = num_match.group(0) if num_match else ""
+    
+    # Isolate player name (everything between year and number)
+    player_parts = clean_name.replace(target_year, "").replace(target_num, "").strip().split()
+    target_player_parts = [p.upper() for p in player_parts if len(p) > 2]
+
     try:
-        token_resp = requests.post(
-            token_url, 
-            headers={"Authorization": f"Basic {encoded_auth}"}, 
-            data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, 
-            timeout=5
-        )
+        token_resp = requests.post(token_url, headers={"Authorization": f"Basic {encoded_auth}"}, data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}, timeout=5)
         token = token_resp.json().get("access_token")
         
-        queries = [
-            f"{clean_name} {grade_filter} sold -reprint -rp",
-            f"{clean_name.replace('#', '')} {grade_filter} sold -reprint",
-            f"{' '.join(clean_name.split()[:3])} {grade_filter} sold"
-        ]
+        # Broad search to find candidates
+        q = f"{clean_name} {grade_filter} sold -reprint -rp"
+        if grade_filter == "Ungraded":
+            q = f"{clean_name} sold -PSA -BGS -SGC -CGC -graded -reprint"
         
-        items = []
-        for q in queries:
-            if grade_filter == "Ungraded":
-                q = q.replace("Ungraded", "") + " -PSA -BGS -SGC -CGC -graded"
-            
-            ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(q)}&category_ids=212&limit=25"
-            resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}, timeout=5)
-            data = resp.json()
-            items = data.get("itemSummaries", [])
-            if items: break 
+        ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={requests.utils.quote(q)}&category_ids=212&limit=40"
+        resp = requests.get(ebay_url, headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}, timeout=5)
+        data = resp.json()
+        items = data.get("itemSummaries", [])
 
         if not items: return 0.0, []
         
         points = []
         for item in items:
             title = item.get('title', '').upper()
+            
+            # --- STRICT 3-POINT FILTER ---
+            # 1. Exact Year Match
+            has_year = target_year in title if target_year else True
+            # 2. Exact Card Number Match (Word boundary check)
+            has_num = re.search(rf"\b{target_num}\b", title) is not None if target_num else True
+            # 3. Exact Player Match (Main name components must exist)
+            has_player = all(p in title for p in target_player_parts)
+
+            # Grade Firewall
+            grade_ok = True
             if "PSA" in grade_filter:
                 all_psa = ["PSA 10", "PSA 9", "PSA 8", "PSA 7", "PSA 6"]
                 if any(g in title for g in all_psa if g != grade_filter.upper()):
-                    continue
+                    grade_ok = False
             
-            if 'price' in item:
-                points.append({"title": item['title'], "price": float(item['price']['value']), "url": item.get('itemWebUrl', '#')})
+            if has_year and has_num and has_player and grade_ok:
+                if 'price' in item:
+                    points.append({"title": item['title'], "price": float(item['price']['value']), "url": item.get('itemWebUrl', '#')})
+            
             if len(points) >= 10: break
                 
         if not points: return 0.0, []
         return (sum(p['price'] for p in points) / len(points)), points
     except Exception as e: 
-        print(f"Ebay API Error: {e}")
         return 0.0, []
-
 def auto_label_crops(crops):
     if not hf_client:
         return ["API Key Missing"] * len(crops)
@@ -111,12 +122,9 @@ def auto_label_crops(crops):
     labels = []
     # UPDATED PROMPT: Force OCR and explicitly ban guessing.
     prompt = """
-    You are a strict OCR text reader for sports cards. 
-    1. Look at the text actually printed on the card.
-    2. DO NOT guess the player based on the uniform or team colors. Read the name exactly as printed.
-    3. Return ONLY a single line formatted strictly as: [Year] [Brand] [Player] [Card Number].
+    Return ONLY a single line formatted strictly as: [Year] [Brand] [Player] [Card Number]
     Example: 2024 Panini Prizm Drake Maye 301
-    Do not include any other words, explanations, or JSON formatting.
+    Ensure the Card Number is at the very end.
     """
     
     for crop in crops:
