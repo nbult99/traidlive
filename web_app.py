@@ -7,13 +7,15 @@ import pandas as pd
 from huggingface_hub import InferenceClient
 from supabase import create_client
 from datetime import datetime, timedelta
+import urllib.parse
+from bs4 import BeautifulSoup
 
-# --- 1. INITIALIZATION ---
+# --- 1. INITIALIZATION & SECURE CONNECTIVITY ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 EBAY_APP_ID = st.secrets.get("EBAY_APP_ID", "")
-EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "") # No longer strictly needed for Finding API, but kept for compatibility
+EBAY_CERT_ID = st.secrets.get("EBAY_CERT_ID", "")
 
 @st.cache_resource
 def init_connections():
@@ -31,7 +33,7 @@ st.markdown("""
     <style>
     .stApp { background-color: #000000; color: #FFFFFF; font-family: -apple-system, sans-serif; }
     div[data-testid="stMetric"] { background: rgba(28, 28, 30, 0.8); border-radius: 18px; padding: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
-    .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 14px; border: none; padding: 12px; font-weight: 600; width: 100%; }
+    .stButton > button { background: linear-gradient(180deg, #0A84FF 0%, #007AFF 100%); color: white; border-radius: 12px; border: none; padding: 12px; font-weight: 600; width: 100%; }
     
     /* Audit Box Styling */
     .audit-box { 
@@ -49,76 +51,77 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. THE "STRICT SOLD" ENGINE (FIXED) ---
+# --- 3. THE "BYPASS" SCRAPER ENGINE ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
     """
-    FORCED COMPLETED SEARCH: Uses the eBay Finding API specifically designed for sold items.
+    Bypasses the eBay API and scrapes the consumer website directly for sold items.
+    Uses eBay's internal LH_Sold=1 and LH_Complete=1 URL parameters.
     """
-    app_id = EBAY_APP_ID
-    if not app_id: return 0.0, []
-    
     try:
         search_query = f"{card_name} {grade_filter}".strip()
-        encoded_query = requests.utils.quote(search_query)
+        encoded_query = urllib.parse.quote(search_query)
         
-        # The Finding API 'findCompletedItems' is the only public endpoint 
-        # that reliably filters out active listings without partner-level API access.
-        url = (
-            f"https://svcs.ebay.com/services/search/FindingService/v1?"
-            f"OPERATION-NAME=findCompletedItems&"
-            f"SERVICE-VERSION=1.13.0&"
-            f"SECURITY-APPNAME={app_id}&"
-            f"RESPONSE-DATA-FORMAT=JSON&"
-            f"REST-PAYLOAD=true&"
-            f"keywords={encoded_query}&"
-            f"categoryId=212&"
-            f"itemFilter(0).name=SoldItemsOnly&"
-            f"itemFilter(0).value=true"
-        )
+        # The exact URL you get when you click "Sold Items" on eBay.com
+        url = f"https://www.ebay.com/sch/i.html?_nkw={encoded_query}&LH_Sold=1&LH_Complete=1"
         
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
+        # Spoofing a modern browser to prevent eBay from blocking the request
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        }
         
-        finding_response = data.get("findCompletedItemsResponse", [{}])[0]
-        ack = finding_response.get("ack", [""])[0]
+        resp = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(resp.text, 'html.parser')
         
-        if ack not in ["Success", "Warning"]:
-            return 0.0, []
-            
-        search_result = finding_response.get("searchResult", [{}])[0]
-        items = search_result.get("item", [])
+        items = soup.find_all('div', class_='s-item__info')
         
-        if not items: return 0.0, []
-            
         points = []
-        for item in items[:5]: # Take top 5 recent sales
-            selling_status = item.get("sellingStatus", [{}])[0]
-            state = selling_status.get("sellingState", [""])[0]
-            
-            # HARD VERIFICATION: Double-check that it actually ended with a sale
-            if state == "EndedWithSales":
-                price_str = selling_status.get("currentPrice", [{}])[0].get("__value__", "0")
-                price = float(price_str)
-                title = item.get("title", ["Unknown Card"])[0]
-                item_url = item.get("viewItemURL", ["#"])[0]
+        for item in items:
+            # eBay puts a hidden dummy item at the top of every list, we skip it
+            title_tag = item.find('div', class_='s-item__title')
+            if not title_tag or "Shop on eBay" in title_tag.text: 
+                continue
                 
-                if price > 0:
-                    points.append({
-                        "title": title,
-                        "price": price,
-                        "url": item_url
-                    })
-                    
-        if not points: return 0.0, []
+            price_tag = item.find('span', class_='s-item__price')
+            if not price_tag: 
+                continue
+                
+            price_text = price_tag.text.replace('$', '').replace(',', '').strip()
+            
+            if 'to' in price_text.lower():
+                continue
+                
+            try:
+                clean_price = float(''.join(c for c in price_text if c.isdigit() or c == '.'))
+            except:
+                continue
+                
+            link_tag = item.find('a', class_='s-item__link')
+            item_url = link_tag['href'] if link_tag else "#"
+            clean_url = item_url.split('?')[0] if '?' in item_url else item_url
+            
+            points.append({
+                "title": title_tag.text.replace("NEW LISTING", "").strip(),
+                "price": clean_price,
+                "url": clean_url
+            })
+            
+            if len(points) >= 5:
+                break
+                
+        if not points: 
+            return 0.0, []
             
         avg = sum(p['price'] for p in points) / len(points)
         return avg, points
         
     except Exception as e:
+        print(f"Scraper Error: {e}")
         return 0.0, []
 
-# --- 4. ORIGINAL LOGIC (RESTORED) ---
+# --- 4. CORE VISION LOGIC (UNTOUCHED) ---
 
 def auto_label_crops(crops):
     if not hf_client: return ["" for _ in crops]
