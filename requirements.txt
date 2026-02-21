@@ -6,4 +6,4 @@ requests
 huggingface_hub
 supabase
 beautifulsoup4
-bs4
+cloudscraper

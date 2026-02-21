@@ -7,7 +7,7 @@ from huggingface_hub import InferenceClient
 from supabase import create_client
 import urllib.parse
 from bs4 import BeautifulSoup
-from curl_cffi import requests # Anti-bot requests library
+import cloudscraper # The Streamlit-friendly anti-bot library
 
 # --- 1. INITIALIZATION & SECURE CONNECTIVITY ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
@@ -49,11 +49,11 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. THE "GHOST" SCRAPER ENGINE ---
+# --- 3. THE "CLOUDSCRAPER" ENGINE ---
 
 def fetch_market_valuation(card_name, grade_filter=""):
     """
-    Bypasses eBay CAPTCHAs using curl_cffi to scrape verified completed sales natively.
+    Bypasses eBay CAPTCHAs using cloudscraper to scrape verified completed sales natively.
     """
     try:
         search_query = f"{card_name} {grade_filter}".strip()
@@ -61,8 +61,9 @@ def fetch_market_valuation(card_name, grade_filter=""):
         
         url = f"https://www.ebay.com/sch/i.html?_nkw={encoded_query}&LH_Sold=1&LH_Complete=1"
         
-        # Impersonate a real Chrome 110 browser
-        resp = requests.get(url, impersonate="chrome110", timeout=15)
+        # Create a scraper that acts like a standard desktop browser
+        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+        resp = scraper.get(url, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
         
         items = soup.find_all('div', class_='s-item__info')
@@ -151,7 +152,7 @@ st.markdown("##### Verified Portfolio Dashboard")
 
 owner_id = st.sidebar.text_input("Customer ID", value="nbult99")
 
-# --- NEW: LIVE PORTFOLIO CALCULATOR ---
+# LIVE PORTFOLIO CALCULATOR
 try:
     vault_res = supabase.table("inventory").select("ungraded_price, psa_10_price").eq("owner", owner_id).execute()
     if vault_res.data:
@@ -170,7 +171,6 @@ k1.metric("Raw Portfolio Value", f"${total_raw:,.2f}")
 k2.metric("PSA 10 Potential", f"${total_psa:,.2f}")
 k3.metric("Assets in Vault", asset_count)
 st.divider()
-# ----------------------------------------
 
 source = st.radio("Asset Source", ["Gallery", "Camera"], horizontal=True)
 
@@ -193,7 +193,7 @@ if uploaded_file:
                     p_raw, _ = fetch_market_valuation(name, "Ungraded")
                     supabase.table("inventory").insert({"card_name": name, "psa_10_price": p_psa, "ungraded_price": p_raw, "owner": owner_id}).execute()
                 st.toast("Sync Complete.")
-                st.rerun() # Refresh the page so the KPI cards update instantly
+                st.rerun() 
 
         if 'suggestions' in st.session_state:
             st.divider()
