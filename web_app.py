@@ -44,7 +44,7 @@ def fetch_market_valuation(card_name, grade_filter=""):
         search_query = f"{card_name} {grade_filter} sold"
         query_encoded = requests.utils.quote(search_query)
         
-        # Increased limit to 10
+        # Pull up to 10 sold listings
         ebay_url = f"https://api.ebay.com/buy/browse/v1/item_summary/search?q={query_encoded}&category_ids=212&limit=10"
         headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"}
         
@@ -107,7 +107,6 @@ def detect_cards(image_file):
 
 st.set_page_config(page_title="TraidLive | Digital Assets", layout="wide")
 
-# iOS Dark Mode CSS Injection
 st.markdown("""
     <style>
     /* Dark background */
@@ -174,22 +173,31 @@ if uploaded_file:
                     
                     if st.button(f"Check Price {i+1}", key=f"chk_{i}"):
                         name = st.session_state['suggestions'][i]
-                        with st.spinner("Fetching data points..."):
-                            psa_val, psa_points = fetch_market_valuation(name, "PSA 10")
-                            raw_val, raw_points = fetch_market_valuation(name, "Ungraded")
+                        with st.spinner("Fetching full grade breakdown..."):
                             
                             def generate_audit_html(label, val, points):
                                 if not points:
-                                    return f"<div class='audit-box'><div class='audit-header'>{label} - ${val:,.2f}</div><div>No data found.</div></div>"
+                                    return f"<div class='audit-box'><div class='audit-header'>{label}</div><div style='color:#FF453A;'>No listings found.</div></div>"
                                 
                                 rows = ""
                                 for p in points:
                                     rows += f"<div class='sold-row'><span class='sold-title'>{p['title']}</span><span class='sold-price'>${p['price']:,.2f}</span><a class='sold-link' href='{p['url']}' target='_blank'>View</a></div>"
                                 
-                                return f"<div class='audit-box'><div class='audit-header'>{label} - ${val:,.2f} (Based on {len(points)} items)</div>{rows}</div>"
+                                return f"<div class='audit-box'><div class='audit-header'>{label} - Avg: ${val:,.2f}</div>{rows}</div>"
 
-                            st.markdown(generate_audit_html("PSA 10", psa_val, psa_points), unsafe_allow_html=True)
-                            st.markdown(generate_audit_html("RAW", raw_val, raw_points), unsafe_allow_html=True)
+                            # Loop through all the requested grades
+                            grades_to_check = [
+                                ("PSA 10", "PSA 10"),
+                                ("PSA 9", "PSA 9"),
+                                ("PSA 8", "PSA 8"),
+                                ("PSA 7", "PSA 7"),
+                                ("PSA 0-6", "PSA (1, 2, 3, 4, 5, 6)"),
+                                ("RAW", "Ungraded")
+                            ]
+                            
+                            for label, grade_query in grades_to_check:
+                                val, points = fetch_market_valuation(name, grade_query)
+                                st.markdown(generate_audit_html(label, val, points), unsafe_allow_html=True)
     else:
         st.warning("No card contours detected.")
 
